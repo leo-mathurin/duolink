@@ -2,23 +2,26 @@ import Foundation
 import Network
 import os
 
-/// How macOS spreads one MPTCP connection over the available interfaces.
+/// How the Mac uses its interfaces for one MPTCP connection.
+///
+/// macOS also has an "aggregate" service type, but it needs a root sysctl and
+/// gains nothing here: the XNU scheduler only spreads uploads between a
+/// cellular and a non-cellular subflow, and Wi-Fi and iPhone USB are both
+/// non-cellular. Downloads are what add up, and the Linux server schedules
+/// those over every subflow the Mac opened.
 public enum MultipathMode: String, CaseIterable, Codable, Sendable {
-    /// Sends on every interface at once to add their bandwidth. Needs
-    /// `net.inet.mptcp.allow_aggregate=1`, see `AggregatePermission`.
-    case aggregate
-    /// Uses the lowest-latency interface and spills over to the others.
-    case interactive
-    /// Uses the primary interface and keeps the others as hot standby.
-    case handover
+    /// Opens a subflow on every interface: the server sends downloads over
+    /// all of them, uploads use the lowest-latency one.
+    case combine
+    /// Keeps a single subflow and moves to another interface if it fails.
+    case backup
     /// Plain TCP. Used by tests over loopback.
     case disabled
 
     var serviceType: NWParameters.MultipathServiceType {
         switch self {
-        case .aggregate: .aggregate
-        case .interactive: .interactive
-        case .handover: .handover
+        case .combine: .interactive
+        case .backup: .handover
         case .disabled: .disabled
         }
     }

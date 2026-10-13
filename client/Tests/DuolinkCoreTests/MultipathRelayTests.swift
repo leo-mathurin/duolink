@@ -74,9 +74,9 @@ import Testing
     }
 
     @Test func upstreamBypassesTheSystemProxyThatPointsBackAtUs() {
-        let parameters = MultipathRelay.upstreamParameters(mode: .aggregate)
+        let parameters = MultipathRelay.upstreamParameters(mode: .combine)
         #expect(parameters.preferNoProxies)
-        #expect(parameters.multipathServiceType == .aggregate)
+        #expect(parameters.multipathServiceType == .interactive)
     }
 
     @Test func tracksActiveConnections() async throws {

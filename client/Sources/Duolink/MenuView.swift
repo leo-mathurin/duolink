@@ -91,9 +91,8 @@ struct MenuView: View {
                 }
             }
             Picker("Mode", selection: $model.mode) {
-                Text("Agréger").tag(MultipathMode.aggregate)
-                Text("Réactif").tag(MultipathMode.interactive)
-                Text("Secours").tag(MultipathMode.handover)
+                Text("Combiner").tag(MultipathMode.combine)
+                Text("Secours").tag(MultipathMode.backup)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -102,17 +101,6 @@ struct MenuView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if model.mode == .aggregate && !model.aggregateAllowed {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("macOS bloque l'agrégation par défaut. En attendant, Duolink utilise le mode Réactif.")
-                        .font(.caption)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Autoriser l'agrégation (mot de passe admin)") { model.allowAggregate() }
-                        .controlSize(.small)
-                }
-                .padding(8)
-                .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
-            }
 
             if model.serverUnreachable {
                 Text("Le serveur ne répond pas. Les apps qui passent par Duolink n'ont plus Internet : vérifiez le VPS ou désactivez Duolink.")
@@ -198,9 +186,8 @@ extension LinkStatus.Kind {
 extension MultipathMode {
     var explanation: String {
         switch self {
-        case .aggregate: "Additionne le débit de toutes les connexions."
-        case .interactive: "Utilise la connexion la plus rapide et déborde sur l'autre si besoin."
-        case .handover: "Utilise une seule connexion et bascule sans coupure si elle tombe."
+        case .combine: "Utilise toutes les connexions : les téléchargements additionnent leur débit."
+        case .backup: "Utilise une seule connexion et bascule sans coupure si elle tombe. Économise le forfait."
         case .disabled: ""
         }
     }

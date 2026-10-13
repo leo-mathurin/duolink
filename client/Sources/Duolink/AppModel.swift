@@ -18,7 +18,6 @@ final class AppModel {
     private(set) var links: [LinkStatus] = []
     private(set) var stats = RelayStats()
     private(set) var tunnelRates = Throughput()
-    private(set) var aggregateAllowed = AggregatePermission.isAllowed
     private(set) var notice: String?
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 
@@ -27,12 +26,6 @@ final class AppModel {
             UserDefaults.standard.set(mode.rawValue, forKey: Keys.mode)
             if isOn { restart() }
         }
-    }
-
-    /// The mode actually used: aggregation silently falls back to interactive
-    /// until the admin permission is granted, instead of failing every connection.
-    var effectiveMode: MultipathMode {
-        mode == .aggregate && !aggregateAllowed ? .interactive : mode
     }
 
     var isOn: Bool { status == .running || status == .starting }
@@ -50,7 +43,7 @@ final class AppModel {
     }
 
     init() {
-        mode = UserDefaults.standard.string(forKey: Keys.mode).flatMap(MultipathMode.init(rawValue:)) ?? .aggregate
+        mode = UserDefaults.standard.string(forKey: Keys.mode).flatMap(MultipathMode.init(rawValue:)) ?? .combine
         server = store.load()
 
         linkMonitor.start { [weak self] links in
@@ -82,7 +75,7 @@ final class AppModel {
         status = .starting
         notice = nil
         let tunnel = Tunnel(
-            options: Tunnel.Options(server: server, mode: effectiveMode, supportDirectory: store.directory)
+            options: Tunnel.Options(server: server, mode: mode, supportDirectory: store.directory)
         ) { [weak self] error in
             Task { @MainActor in self?.fail(error, from: nil) }
         }
@@ -137,11 +130,6 @@ final class AppModel {
     }
 
     private func tick() {
-        let allowed = AggregatePermission.isAllowed
-        if allowed != aggregateAllowed {
-            aggregateAllowed = allowed
-            if mode == .aggregate, isOn { restart() }
-        }
         guard let tunnel else { return }
         stats = tunnel.relayStats
         let now = ProcessInfo.processInfo.systemUptime
@@ -167,17 +155,6 @@ final class AppModel {
             if isOn { restart() }
         } catch {
             notice = "Ce n'est pas un lien ss:// valide."
-        }
-    }
-
-    func allowAggregate() {
-        Task.detached {
-            do {
-                try AggregatePermission.install()
-            } catch {
-                await MainActor.run { self.notice = error.localizedDescription }
-            }
-            await MainActor.run { self.tick() }
         }
     }
 

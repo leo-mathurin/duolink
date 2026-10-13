@@ -1,22 +1,15 @@
 import DuolinkCore
 import Foundation
 
-// Prints the root script that allows the aggregation mode:
-//   duolinkctl allow-aggregate | sudo sh
-if CommandLine.arguments.dropFirst().first == "allow-aggregate" {
-    print(AggregatePermission.installScript)
-    exit(0)
-}
-
 // Headless runner, handy over SSH or to test without the menu bar app:
-//   DUOLINK_LINK='ss://...' duolinkctl [aggregate|interactive|handover] [--system-proxy]
+//   DUOLINK_LINK='ss://...' duolinkctl [combine|backup] [--system-proxy]
 // The link comes from the environment so the password stays out of `ps`.
 let arguments = CommandLine.arguments.dropFirst()
 guard let link = ProcessInfo.processInfo.environment["DUOLINK_LINK"], let server = try? ServerConfig(uri: link) else {
-    FileHandle.standardError.write(Data("usage: DUOLINK_LINK=<ss://link> duolinkctl [aggregate|interactive|handover] [--system-proxy]\n".utf8))
+    FileHandle.standardError.write(Data("usage: DUOLINK_LINK=<ss://link> duolinkctl [combine|backup] [--system-proxy]\n".utf8))
     exit(64)
 }
-let mode = arguments.compactMap(MultipathMode.init(rawValue:)).first ?? .aggregate
+let mode = arguments.compactMap(MultipathMode.init(rawValue:)).first ?? .combine
 var options = Tunnel.Options(
     server: server,
     mode: mode,

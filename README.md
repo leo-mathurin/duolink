@@ -13,7 +13,7 @@ Apps du Mac
 sing-box (client Shadowsocks 2022, chiffré)
    │  TCP local (127.0.0.1:20801)
    ▼
-Relais MPTCP (Network.framework, mode aggregate)
+Relais MPTCP (Network.framework)
    ├── sous-flux via le Wi-Fi du train ──┐
    └── sous-flux via l'iPhone en USB ────┤
                                          ▼
@@ -77,8 +77,7 @@ cd duolink
 Puis, dans le menu Duolink :
 
 1. Copiez le lien `ss://` affiché par le serveur et cliquez sur **Coller le lien ss://**.
-2. Cliquez sur **Autoriser l'agrégation** et entrez votre mot de passe administrateur (une seule fois, voir plus bas).
-3. Activez l'interrupteur.
+2. Activez l'interrupteur. Aucun mot de passe administrateur n'est demandé.
 
 ## Dans le train
 
@@ -94,15 +93,12 @@ Si le serveur ne répond plus, le menu affiche une alerte rouge : les apps qui p
 
 | Mode | Comportement |
 |---|---|
-| **Agréger** | Envoie sur toutes les interfaces en même temps pour additionner les débits. |
-| **Réactif** | Utilise l'interface la plus rapide et déborde sur l'autre quand elle sature. |
-| **Secours** | Utilise une seule interface et bascule sans couper les connexions si elle tombe. Économise le forfait de l'iPhone. |
+| **Combiner** | Ouvre un sous-flux sur chaque connexion. Le serveur envoie les téléchargements sur toutes à la fois, leurs débits s'additionnent. Les envois du Mac passent par la connexion la plus rapide. |
+| **Secours** | Utilise une seule connexion et bascule sans couper les connexions si elle tombe. Économise le forfait de l'iPhone. |
 
-### Pourquoi un mot de passe administrateur
+### Pourquoi pas le mode « aggregate » de macOS
 
-macOS refuse le mode MPTCP « aggregate » aux apps tierces tant que le réglage `net.inet.mptcp.allow_aggregate` vaut 0. Ce réglage revient à 0 à chaque redémarrage. Duolink installe donc un LaunchDaemon (`/Library/LaunchDaemons/io.github.leo-mathurin.duolink.allow-aggregate.plist`) qui le remet à 1 au démarrage. Sans cette autorisation, Duolink utilise le mode Réactif.
-
-Pour le faire à la main : `dist/duolinkctl allow-aggregate | sudo sh`.
+macOS propose un mode MPTCP « aggregate », réservé aux apps tierces après un réglage root (`net.inet.mptcp.allow_aggregate`). Il n'apporterait rien ici : l'ordonnanceur du noyau ne répartit les envois qu'entre une interface cellulaire et une interface non cellulaire, et le Wi-Fi comme l'iPhone en USB sont non cellulaires. Ce sont les téléchargements qui comptent dans le train, et c'est le serveur Linux qui les répartit sur tous les sous-flux.
 
 ## Limites
 
@@ -110,7 +106,8 @@ Pour le faire à la main : `dist/duolinkctl allow-aggregate | sudo sh`.
 - **L'UDP passe dans le flux TCP** (UDP over TCP). Il est agrégé, mais un appel vidéo en UDP peut subir plus de latence qu'en direct. Les navigateurs n'utilisent pas QUIC à travers un proxy, ils restent donc en TCP agrégé.
 - **Le gain dépend du réseau.** Le Wi-Fi du train est lui-même une liaison 4G sur le toit, et il traverse les mêmes tunnels et zones blanches que votre téléphone. Le gain le plus visible est la continuité : quand un lien tombe, les connexions continuent sur l'autre.
 - **Portails captifs** : seuls `wifi.sncf`, `captive.apple.com`, les domaines `.local` et les adresses privées restent en direct. Sur un autre réseau, désactivez Duolink le temps de valider le portail.
-- **Le forfait de l'iPhone est consommé** en mode Agréger. Passez en mode Secours pour l'économiser.
+- **Les envois ne s'additionnent pas** : un upload passe par une seule connexion à la fois (voir plus haut). Il bascule sur l'autre si elle est plus rapide ou si elle tombe.
+- **Le forfait de l'iPhone est consommé** en mode Combiner. Passez en mode Secours pour l'économiser.
 - **Si l'app est tuée brutalement**, le proxy système peut rester actif et couper Internet. Relancez Duolink : il arrête l'ancien sing-box et restaure le réglage. Sinon, désactivez les proxys dans Réglages Système > Réseau > Wi-Fi > Proxys.
 
 ## Outil en ligne de commande
@@ -118,8 +115,8 @@ Pour le faire à la main : `dist/duolinkctl allow-aggregate | sudo sh`.
 `duolinkctl` lance le même tunnel sans interface, pratique pour tester :
 
 ```sh
-DUOLINK_LINK='ss://...' dist/duolinkctl aggregate                 # proxy sur 127.0.0.1:20802
-DUOLINK_LINK='ss://...' dist/duolinkctl interactive --system-proxy
+DUOLINK_LINK='ss://...' dist/duolinkctl                    # mode Combiner, proxy sur 127.0.0.1:20802
+DUOLINK_LINK='ss://...' dist/duolinkctl backup --system-proxy
 ```
 
 Pour vérifier que le serveur reçoit bien du MPTCP : `ss -Mni` sur le VPS liste les connexions MPTCP et leurs sous-flux.
@@ -128,8 +125,6 @@ Pour vérifier que le serveur reçoit bien du MPTCP : `ss -Mni` sur le VPS liste
 
 ```sh
 rm -rf /Applications/Duolink.app ~/Library/Application\ Support/Duolink
-sudo launchctl bootout system/io.github.leo-mathurin.duolink.allow-aggregate
-sudo rm /Library/LaunchDaemons/io.github.leo-mathurin.duolink.allow-aggregate.plist
 ```
 
 Sur le serveur : `docker compose down` dans `server/`, puis `sudo systemctl disable --now duolink-mptcp`.
