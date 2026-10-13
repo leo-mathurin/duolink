@@ -72,7 +72,17 @@ struct MenuView: View {
                 }
                 .font(.callout)
             }
-            if model.links.count < 2 {
+            if model.tetheringBlocked {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("L'iPhone est branché, mais macOS laisse sa connexion USB éteinte.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Réparer (mot de passe admin, une seule fois)") { model.fixTethering() }
+                        .controlSize(.small)
+                }
+                .padding(8)
+                .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+            } else if model.links.count < 2 {
                 Text("Branchez l'iPhone en USB avec le partage de connexion actif pour ajouter un deuxième lien.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

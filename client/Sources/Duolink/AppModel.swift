@@ -19,6 +19,8 @@ final class AppModel {
     private(set) var stats = RelayStats()
     private(set) var tunnelRates = Throughput()
     private(set) var notice: String?
+    /// The iPhone is plugged in but macOS left its interface down.
+    private(set) var tetheringBlocked = false
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var mode: MultipathMode {
@@ -130,6 +132,7 @@ final class AppModel {
     }
 
     private func tick() {
+        tetheringBlocked = !TetheringFix.isInstalled && !TetheringFix.currentInterfacesLeftDown().isEmpty
         guard let tunnel else { return }
         stats = tunnel.relayStats
         let now = ProcessInfo.processInfo.systemUptime
@@ -155,6 +158,17 @@ final class AppModel {
             if isOn { restart() }
         } catch {
             notice = "Ce n'est pas un lien ss:// valide."
+        }
+    }
+
+    func fixTethering() {
+        Task.detached {
+            do {
+                try TetheringFix.install()
+            } catch {
+                await MainActor.run { self.notice = error.localizedDescription }
+            }
+            await MainActor.run { self.tick() }
         }
     }
 

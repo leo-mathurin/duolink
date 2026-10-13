@@ -1,6 +1,13 @@
 import DuolinkCore
 import Foundation
 
+// Prints the root script that keeps the iPhone USB interface up:
+//   duolinkctl fix-tethering | sudo sh
+if CommandLine.arguments.dropFirst().first == "fix-tethering" {
+    print(TetheringFix.installScript)
+    exit(0)
+}
+
 // Headless runner, handy over SSH or to test without the menu bar app:
 //   DUOLINK_LINK='ss://...' duolinkctl [combine|backup] [--system-proxy]
 // The link comes from the environment so the password stays out of `ps`.

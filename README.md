@@ -83,6 +83,7 @@ Puis, dans le menu Duolink :
 
 1. Connectez-vous au Wi-Fi du train et validez son portail. Le portail `wifi.sncf` reste joignable quand Duolink est actif.
 2. Activez le partage de connexion sur l'iPhone et branchez-le **en USB**. Le Mac n'a qu'une carte Wi-Fi : il ne peut pas rejoindre deux réseaux Wi-Fi en même temps.
+   Sur macOS 26, l'interface « iPhone USB » peut rester éteinte : le Mac la crée mais ne l'active jamais, et l'iPhone ne démarre pas le partage. Duolink le détecte et propose **Réparer** (mot de passe administrateur, une seule fois). Cela installe un LaunchDaemon qui active cette interface dès qu'elle apparaît. À la main : `dist/duolinkctl fix-tethering | sudo sh`.
 3. Les deux liens apparaissent dans le menu avec leur débit. Pendant un téléchargement, les deux doivent bouger. Ces compteurs incluent aussi le trafic hors tunnel : pour une preuve stricte, `ss -Mni` sur le VPS montre les sous-flux de chaque connexion.
 
 Si le Wi-Fi est connecté mais sans Internet (portail pas encore validé, tunnel, liaison du train coupée), une connexion qui n'aboutit pas en 2,5 secondes est relancée en évitant cette interface, donc via l'iPhone. Le Wi-Fi rejoint la connexion plus tard s'il revient.
@@ -125,6 +126,13 @@ Pour vérifier que le serveur reçoit bien du MPTCP : `ss -Mni` sur le VPS liste
 
 ```sh
 rm -rf /Applications/Duolink.app ~/Library/Application\ Support/Duolink
+```
+
+Si vous avez utilisé **Réparer** :
+
+```sh
+sudo launchctl bootout system/io.github.leo-mathurin.duolink.tethering
+sudo rm /Library/LaunchDaemons/io.github.leo-mathurin.duolink.tethering.plist
 ```
 
 Sur le serveur : `docker compose down` dans `server/`, puis `sudo systemctl disable --now duolink-mptcp`.
