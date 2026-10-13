@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+dist/
+*.xcodeproj
+server/config.json
+server/.password
+.DS_Store
