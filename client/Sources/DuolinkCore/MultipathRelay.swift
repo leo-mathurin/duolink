@@ -30,6 +30,9 @@ public struct RelayStats: Sendable, Equatable {
     public var bytesUp: UInt64 = 0
     public var bytesDown: UInt64 = 0
     public var lastError: String?
+    /// Upstream connections that failed in a row. Non-zero for a while means
+    /// the server is unreachable and proxied apps have no internet.
+    public var consecutiveFailures = 0
 
     public init() {}
 }
@@ -42,17 +45,25 @@ public final class MultipathRelay: @unchecked Sendable {
     private let upstreamPort: NWEndpoint.Port
     private let mode: MultipathMode
     private let queue = DispatchQueue(label: "duolink.relay")
-    private let state = OSAllocatedUnfairLock(initialState: RelayStats())
+    private let statsLock = OSAllocatedUnfairLock(initialState: RelayStats())
     private var listener: NWListener?
     private var pairs: [ObjectIdentifier: RelayPair] = [:]
 
-    public init(upstreamHost: String, upstreamPort: UInt16, mode: MultipathMode) {
+    private let timing: UpstreamDialer.Timing
+
+    public init(
+        upstreamHost: String,
+        upstreamPort: UInt16,
+        mode: MultipathMode,
+        timing: UpstreamDialer.Timing = .init()
+    ) {
         self.upstreamHost = NWEndpoint.Host(upstreamHost)
         self.upstreamPort = NWEndpoint.Port(rawValue: upstreamPort)!
         self.mode = mode
+        self.timing = timing
     }
 
-    public var stats: RelayStats { state.withLock { $0 } }
+    public var stats: RelayStats { statsLock.withLock { $0 } }
 
     /// Starts listening on 127.0.0.1. Pass 0 to pick a free port.
     /// Returns the bound port.
@@ -73,6 +84,10 @@ public final class MultipathRelay: @unchecked Sendable {
                 case .failed(let error):
                     listener.stateUpdateHandler = nil
                     continuation.resume(throwing: error)
+                case .cancelled:
+                    // `stop()` ran before the listener was ready.
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: CancellationError())
                 default:
                     break
                 }
@@ -109,11 +124,13 @@ public final class MultipathRelay: @unchecked Sendable {
     }
 
     private func accept(_ inbound: NWConnection) {
-        let parameters = Self.upstreamParameters(mode: mode)
-        let outbound = NWConnection(host: upstreamHost, port: upstreamPort, using: parameters)
-
-        let pair = RelayPair(inbound: inbound, outbound: outbound, queue: queue) { [weak self] direction, count in
-            self?.state.withLock {
+        let dialer = UpstreamDialer(queue: queue, timing: timing) { [upstreamHost, upstreamPort, mode] prohibited in
+            let parameters = Self.upstreamParameters(mode: mode)
+            parameters.prohibitedInterfaces = prohibited
+            return NWConnection(host: upstreamHost, port: upstreamPort, using: parameters)
+        }
+        let pair = RelayPair(inbound: inbound, dialer: dialer, queue: queue) { [weak self] direction, count in
+            self?.statsLock.withLock {
                 switch direction {
                 case .up: $0.bytesUp += UInt64(count)
                 case .down: $0.bytesDown += UInt64(count)
@@ -122,16 +139,22 @@ public final class MultipathRelay: @unchecked Sendable {
         }
         let id = ObjectIdentifier(pair)
         pairs[id] = pair
-        state.withLock {
+        statsLock.withLock {
             $0.connectionsOpened += 1
             $0.activeConnections += 1
         }
-        pair.onClose = { [weak self] error in
+        pair.onConnected = { [weak self] in
+            self?.statsLock.withLock { $0.consecutiveFailures = 0 }
+        }
+        pair.onClose = { [weak self] dialError in
             guard let self else { return }
             self.pairs[id] = nil
-            self.state.withLock {
+            self.statsLock.withLock {
                 $0.activeConnections -= 1
-                if let error { $0.lastError = error }
+                if let dialError {
+                    $0.lastError = dialError
+                    $0.consecutiveFailures += 1
+                }
             }
         }
         pair.start()
@@ -144,16 +167,19 @@ private final class RelayPair: @unchecked Sendable {
     enum Direction { case up, down }
 
     private let inbound: NWConnection
-    private let outbound: NWConnection
+    private let dialer: UpstreamDialer
+    private var outbound: NWConnection?
     private let queue: DispatchQueue
     private let onBytes: (Direction, Int) -> Void
     private var finishedDirections = 0
     private var closed = false
+    var onConnected: (() -> Void)?
+    /// Receives the dial error when the upstream could not be reached.
     var onClose: ((String?) -> Void)?
 
-    init(inbound: NWConnection, outbound: NWConnection, queue: DispatchQueue, onBytes: @escaping (Direction, Int) -> Void) {
+    init(inbound: NWConnection, dialer: UpstreamDialer, queue: DispatchQueue, onBytes: @escaping (Direction, Int) -> Void) {
         self.inbound = inbound
-        self.outbound = outbound
+        self.dialer = dialer
         self.queue = queue
         self.onBytes = onBytes
     }
@@ -165,50 +191,45 @@ private final class RelayPair: @unchecked Sendable {
             default: break
             }
         }
-        outbound.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.pump(from: self.inbound, to: self.outbound, direction: .up)
-                self.pump(from: self.outbound, to: self.inbound, direction: .down)
-            case .waiting(let error), .failed(let error):
-                // `.waiting` covers refused connections and a missing
-                // aggregate permission (EACCES). The client retries anyway.
-                self.close(error: "\(error)")
-            case .cancelled:
-                self.close()
-            default:
-                break
+        inbound.start(queue: queue)
+        dialer.dial { [weak self] result in
+            guard let self, !self.closed else { return }
+            switch result {
+            case .success(let outbound):
+                self.outbound = outbound
+                self.onConnected?()
+                outbound.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .failed, .cancelled: self?.close()
+                    default: break
+                    }
+                }
+                self.pump(from: self.inbound, to: outbound, direction: .up)
+                self.pump(from: outbound, to: self.inbound, direction: .down)
+            case .failure(let error):
+                self.close(error: error.message)
             }
         }
-        inbound.start(queue: queue)
-        outbound.start(queue: queue)
     }
 
     private func pump(from source: NWConnection, to sink: NWConnection, direction: Direction) {
         source.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let self, !self.closed else { return }
-            if let data, !data.isEmpty {
-                self.onBytes(direction, data.count)
-                sink.send(content: data, completion: .contentProcessed { [weak self] sendError in
-                    guard let self, !self.closed else { return }
-                    if sendError != nil {
-                        self.close()
-                    } else if isComplete {
-                        self.finish(sink)
-                    } else if error != nil {
-                        self.close()
-                    } else {
-                        self.pump(from: source, to: sink, direction: direction)
-                    }
-                })
-            } else if isComplete {
-                self.finish(sink)
-            } else if error != nil {
-                self.close()
-            } else {
-                self.pump(from: source, to: sink, direction: direction)
+            let next: @Sendable () -> Void = {
+                if isComplete {
+                    self.finish(sink)
+                } else if error != nil {
+                    self.close()
+                } else {
+                    self.pump(from: source, to: sink, direction: direction)
+                }
             }
+            guard let data, !data.isEmpty else { return next() }
+            self.onBytes(direction, data.count)
+            sink.send(content: data, completion: .contentProcessed { [weak self] sendError in
+                guard let self, !self.closed else { return }
+                sendError == nil ? next() : self.close()
+            })
         }
     }
 
@@ -218,16 +239,23 @@ private final class RelayPair: @unchecked Sendable {
         sink.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             self.finishedDirections += 1
-            if self.finishedDirections == 2 { self.close() }
+            if self.finishedDirections == 2 { self.close(linger: true) }
         })
     }
 
-    func close(error: String? = nil) {
+    /// `linger` keeps the connections alive for a while after a clean close:
+    /// cancelling right after the FIN drops data still in the send buffers.
+    func close(error: String? = nil, linger: Bool = false) {
         guard !closed else { return }
         closed = true
-        inbound.cancel()
-        outbound.cancel()
+        dialer.cancel()
         onClose?(error)
         onClose = nil
+        let connections = [inbound, outbound].compactMap { $0 }
+        if linger {
+            queue.asyncAfter(deadline: .now() + 30) { connections.forEach { $0.cancel() } }
+        } else {
+            connections.forEach { $0.cancel() }
+        }
     }
 }

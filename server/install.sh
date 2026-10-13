@@ -47,16 +47,23 @@ fi
 
 log "Firewall: allow TCP $PORT"
 rule=(-p tcp -m tcp --dport "$PORT" -m comment --comment duolink -j ACCEPT)
-if ! sudo iptables -C INPUT "${rule[@]}" 2>/dev/null; then
-  # Insert before the catch-all REJECT that Oracle images ship with.
-  reject_line="$(sudo iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" { print $1; exit }')"
-  sudo iptables -I INPUT "${reject_line:-1}" "${rule[@]}"
-fi
-if [[ -f /etc/iptables/rules.v4 ]] && ! sudo grep -q 'comment duolink' /etc/iptables/rules.v4; then
-  # Edit the saved file instead of `netfilter-persistent save`, which would
-  # also persist the chains that Docker and Tailscale create at runtime.
-  sudo sed -i "0,/^-A INPUT -j REJECT/s//-A INPUT -p tcp -m tcp --dport $PORT -m comment --comment duolink -j ACCEPT\n&/" /etc/iptables/rules.v4
-fi
+for family in iptables ip6tables; do
+  command -v "$family" >/dev/null || continue
+  if ! sudo "$family" -C INPUT "${rule[@]}" 2>/dev/null; then
+    # Insert before the catch-all REJECT that Oracle images ship with.
+    reject_line="$(sudo "$family" -L INPUT --line-numbers -n | awk '$2 == "REJECT" { print $1; exit }')"
+    sudo "$family" -I INPUT "${reject_line:-1}" "${rule[@]}"
+  fi
+done
+for saved in /etc/iptables/rules.v4 /etc/iptables/rules.v6; do
+  if [[ -f "$saved" ]] && ! sudo grep -q 'comment duolink' "$saved"; then
+    # Edit the saved file instead of `netfilter-persistent save`, which would
+    # also persist the chains that Docker and Tailscale create at runtime.
+    if sudo grep -q '^-A INPUT -j REJECT' "$saved"; then
+      sudo sed -i "0,/^-A INPUT -j REJECT/s//-A INPUT -p tcp -m tcp --dport $PORT -m comment --comment duolink -j ACCEPT\n&/" "$saved"
+    fi
+  fi
+done
 
 if [[ -f "$DIR/.password" ]]; then
   PASSWORD="$(cat "$DIR/.password")"
@@ -96,7 +103,7 @@ cat <<EOF
 Done. Remember to also open TCP $PORT in your cloud firewall
 (Oracle: VCN security list or network security group).
 
-Paste this link in Duolink (menu bar > Importer un lien ss://):
+Copy this link, then in the Duolink menu click "Coller le lien ss://":
 
   ss://$USERINFO@$PUBLIC_IP:$PORT#duolink
 

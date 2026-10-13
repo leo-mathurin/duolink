@@ -10,8 +10,7 @@ public struct LinkStatus: Identifiable, Equatable, Sendable {
     public var interface: String
     public var name: String
     public var kind: Kind
-    public var downRate: Double
-    public var upRate: Double
+    public var rates: Throughput
 }
 
 /// Lists the interfaces MPTCP can use and how much traffic each one carries,
@@ -66,8 +65,7 @@ public final class LinkMonitor: @unchecked Sendable {
                 interface: bsd,
                 name: name,
                 kind: Self.kind(of: interface, displayName: name),
-                downRate: down,
-                upRate: up
+                rates: Throughput(down: down, up: up)
             )
         }
     }

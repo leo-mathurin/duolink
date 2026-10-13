@@ -84,7 +84,11 @@ Puis, dans le menu Duolink :
 
 1. Connectez-vous au Wi-Fi du train et validez son portail. Le portail `wifi.sncf` reste joignable quand Duolink est actif.
 2. Activez le partage de connexion sur l'iPhone et branchez-le **en USB**. Le Mac n'a qu'une carte Wi-Fi : il ne peut pas rejoindre deux réseaux Wi-Fi en même temps.
-3. Les deux liens apparaissent dans le menu avec leur débit. Pendant un téléchargement, les deux doivent bouger.
+3. Les deux liens apparaissent dans le menu avec leur débit. Pendant un téléchargement, les deux doivent bouger. Ces compteurs incluent aussi le trafic hors tunnel : pour une preuve stricte, `ss -Mni` sur le VPS montre les sous-flux de chaque connexion.
+
+Si le Wi-Fi est connecté mais sans Internet (portail pas encore validé, tunnel, liaison du train coupée), une connexion qui n'aboutit pas en 2,5 secondes est relancée en évitant cette interface, donc via l'iPhone. Le Wi-Fi rejoint la connexion plus tard s'il revient.
+
+Si le serveur ne répond plus, le menu affiche une alerte rouge : les apps qui passent par le proxy n'ont alors plus Internet. Désactivez Duolink pour repasser en direct.
 
 ### Modes
 
@@ -105,6 +109,7 @@ Pour le faire à la main : `dist/duolinkctl allow-aggregate | sudo sh`.
 - **Seules les apps qui respectent le proxy système passent par le tunnel** : navigateurs, la plupart des apps macOS, `curl` avec `-x`. Les autres sortent en direct, sans agrégation.
 - **L'UDP passe dans le flux TCP** (UDP over TCP). Il est agrégé, mais un appel vidéo en UDP peut subir plus de latence qu'en direct. Les navigateurs n'utilisent pas QUIC à travers un proxy, ils restent donc en TCP agrégé.
 - **Le gain dépend du réseau.** Le Wi-Fi du train est lui-même une liaison 4G sur le toit, et il traverse les mêmes tunnels et zones blanches que votre téléphone. Le gain le plus visible est la continuité : quand un lien tombe, les connexions continuent sur l'autre.
+- **Portails captifs** : seuls `wifi.sncf`, `captive.apple.com`, les domaines `.local` et les adresses privées restent en direct. Sur un autre réseau, désactivez Duolink le temps de valider le portail.
 - **Le forfait de l'iPhone est consommé** en mode Agréger. Passez en mode Secours pour l'économiser.
 - **Si l'app est tuée brutalement**, le proxy système peut rester actif et couper Internet. Relancez Duolink : il arrête l'ancien sing-box et restaure le réglage. Sinon, désactivez les proxys dans Réglages Système > Réseau > Wi-Fi > Proxys.
 

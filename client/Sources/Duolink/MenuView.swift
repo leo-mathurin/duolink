@@ -68,7 +68,7 @@ struct MenuView: View {
                         .foregroundStyle(.secondary)
                     Text(link.name).lineLimit(1)
                     Spacer()
-                    RateLabel(down: link.downRate, up: link.upRate)
+                    RateLabel(rates: link.rates)
                 }
                 .font(.callout)
             }
@@ -87,7 +87,7 @@ struct MenuView: View {
                 Text("Tunnel").font(.subheadline.weight(.semibold))
                 Spacer()
                 if model.isOn {
-                    RateLabel(down: model.tunnelDownRate, up: model.tunnelUpRate).font(.callout)
+                    RateLabel(rates: model.tunnelRates).font(.callout)
                 }
             }
             Picker("Mode", selection: $model.mode) {
@@ -112,6 +112,15 @@ struct MenuView: View {
                 }
                 .padding(8)
                 .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            if model.serverUnreachable {
+                Text("Le serveur ne répond pas. Les apps qui passent par Duolink n'ont plus Internet : vérifiez le VPS ou désactivez Duolink.")
+                    .font(.caption)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if model.isOn {
@@ -160,11 +169,10 @@ struct MenuView: View {
 }
 
 struct RateLabel: View {
-    let down: Double
-    let up: Double
+    let rates: Throughput
 
     var body: some View {
-        Text("↓ \(Self.format(down))  ↑ \(Self.format(up))")
+        Text("↓ \(Self.format(rates.down))  ↑ \(Self.format(rates.up))")
             .monospacedDigit()
             .foregroundStyle(.secondary)
     }

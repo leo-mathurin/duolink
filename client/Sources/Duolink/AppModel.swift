@@ -17,8 +17,7 @@ final class AppModel {
     private(set) var status: Status = .stopped
     private(set) var links: [LinkStatus] = []
     private(set) var stats = RelayStats()
-    private(set) var tunnelDownRate: Double = 0
-    private(set) var tunnelUpRate: Double = 0
+    private(set) var tunnelRates = Throughput()
     private(set) var aggregateAllowed = AggregatePermission.isAllowed
     private(set) var notice: String?
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -43,6 +42,7 @@ final class AppModel {
     private var tunnel: Tunnel?
     private var meters = (down: RateMeter(), up: RateMeter())
     private var ticker: Timer?
+    private var activity: NSObjectProtocol?
 
     private enum Keys {
         static let mode = "mode"
@@ -62,7 +62,7 @@ final class AppModel {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tunnel?.stop() }
+            MainActor.assumeIsolated { self?.detachTunnel()?.stop() }
         }
 
         if server != nil, UserDefaults.standard.bool(forKey: Keys.enabled) { start() }
@@ -70,51 +70,70 @@ final class AppModel {
 
     func setEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Keys.enabled)
-        enabled ? start() : stop()
+        if enabled {
+            start()
+        } else {
+            Task { await stop() }
+        }
     }
 
     func start() {
         guard let server, tunnel == nil else { return }
         status = .starting
         notice = nil
-        let tunnel = Tunnel(options: Tunnel.Options(
-            server: server,
-            mode: effectiveMode,
-            supportDirectory: store.directory
-        ))
-        tunnel.onFailure = { [weak self] error in
-            Task { @MainActor in self?.fail(error) }
+        let tunnel = Tunnel(
+            options: Tunnel.Options(server: server, mode: effectiveMode, supportDirectory: store.directory)
+        ) { [weak self] error in
+            Task { @MainActor in self?.fail(error, from: nil) }
         }
         self.tunnel = tunnel
+        // Keeps App Nap from throttling the relay while the menu is closed.
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Relais du trafic réseau"
+        )
         Task {
             do {
                 try await tunnel.start()
                 if self.tunnel === tunnel { status = .running }
+            } catch is CancellationError {
             } catch {
-                fail(error)
+                fail(error, from: tunnel)
             }
         }
     }
 
-    func stop() {
-        tunnel?.stop()
-        tunnel = nil
+    func stop() async {
+        guard let tunnel = detachTunnel() else { return }
         status = .stopped
+        await tunnel.shutdown()
+    }
+
+    /// Clears the running state and hands back the tunnel to shut down.
+    private func detachTunnel() -> Tunnel? {
+        let tunnel = self.tunnel
+        self.tunnel = nil
         stats = RelayStats()
-        tunnelDownRate = 0
-        tunnelUpRate = 0
+        tunnelRates = Throughput()
         meters = (RateMeter(), RateMeter())
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
+        return tunnel
     }
 
     private func restart() {
-        stop()
-        start()
+        Task {
+            await stop()
+            start()
+        }
     }
 
-    private func fail(_ error: Error) {
-        tunnel?.stop()
-        tunnel = nil
+    /// `origin` is the tunnel that failed; nil means the current one.
+    private func fail(_ error: Error, from origin: Tunnel?) {
+        if let origin, origin !== tunnel { return }
+        let tunnel = detachTunnel()
         status = .failed(error.localizedDescription)
+        Task { await tunnel?.shutdown() }
     }
 
     private func tick() {
@@ -126,9 +145,14 @@ final class AppModel {
         guard let tunnel else { return }
         stats = tunnel.relayStats
         let now = ProcessInfo.processInfo.systemUptime
-        tunnelDownRate = meters.down.record(bytes: stats.bytesDown, at: now) ?? 0
-        tunnelUpRate = meters.up.record(bytes: stats.bytesUp, at: now) ?? 0
+        tunnelRates = Throughput(
+            down: meters.down.record(bytes: stats.bytesDown, at: now) ?? 0,
+            up: meters.up.record(bytes: stats.bytesUp, at: now) ?? 0
+        )
     }
+
+    /// A few failed connections in a row: apps behind the proxy have no internet.
+    var serverUnreachable: Bool { status == .running && stats.consecutiveFailures >= 3 }
 
     func importLinkFromClipboard() {
         guard let text = NSPasteboard.general.string(forType: .string) else {
@@ -147,9 +171,9 @@ final class AppModel {
     }
 
     func allowAggregate() {
-        Task.detached { [directory = store.directory] in
+        Task.detached {
             do {
-                try AggregatePermission.install(scratchDirectory: directory)
+                try AggregatePermission.install()
             } catch {
                 await MainActor.run { self.notice = error.localizedDescription }
             }
@@ -171,12 +195,12 @@ final class AppModel {
     }
 
     func openLog() {
-        NSWorkspace.shared.open(store.directory.appending(path: "sing-box.log"))
+        NSWorkspace.shared.open(Tunnel.logURL(in: store.directory))
     }
 
     func quit() {
-        tunnel?.stop()
-        tunnel = nil
+        // Synchronous on purpose: sing-box must restore the proxy before exit.
+        detachTunnel()?.stop()
         NSApplication.shared.terminate(nil)
     }
 }

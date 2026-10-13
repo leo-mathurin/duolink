@@ -33,7 +33,44 @@ import Testing
 
         let reply = try await LoopbackClient.roundTrip(port: port, payload: Data("hi".utf8))
         #expect(reply.isEmpty)
-        try await waitUntil { relay.stats.activeConnections == 0 && relay.stats.connectionsOpened == 1 }
+        try await waitUntil { relay.stats.activeConnections == 0 && relay.stats.consecutiveFailures == 1 }
+    }
+
+    @Test func dropsTheClientWhenTheUpstreamNeverAnswers() async throws {
+        // TEST-NET-1 is not routed: the SYN goes unanswered, like on a dead link.
+        let relay = MultipathRelay(
+            upstreamHost: "192.0.2.1",
+            upstreamPort: 8443,
+            mode: .disabled,
+            timing: .init(fallbackDelay: 0.2, timeout: 1)
+        )
+        let port = try await relay.start(port: 0)
+        defer { relay.stop() }
+
+        let started = ContinuousClock.now
+        let reply = try await LoopbackClient.roundTrip(port: port, payload: Data("hi".utf8))
+        #expect(reply.isEmpty)
+        #expect(ContinuousClock.now - started < .seconds(5))
+        try await waitUntil { relay.stats.consecutiveFailures == 1 }
+    }
+
+    @Test func aSuccessfulConnectionResetsTheFailureCount() async throws {
+        let echo = try await EchoServer.start()
+        defer { echo.stop() }
+        let relay = MultipathRelay(upstreamHost: "127.0.0.1", upstreamPort: echo.port, mode: .disabled)
+        let port = try await relay.start(port: 0)
+        defer { relay.stop() }
+
+        _ = try await LoopbackClient.roundTrip(port: port, payload: Data("hi".utf8))
+        #expect(relay.stats.consecutiveFailures == 0)
+        #expect(relay.stats.lastError == nil)
+    }
+
+    @Test func refusedAndForbiddenAreDefinitive() {
+        #expect(UpstreamDialer.isDefinitive(.posix(.ECONNREFUSED)))
+        #expect(UpstreamDialer.isDefinitive(.posix(.EACCES)))
+        #expect(!UpstreamDialer.isDefinitive(.posix(.ETIMEDOUT)))
+        #expect(!UpstreamDialer.isDefinitive(.posix(.ENETUNREACH)))
     }
 
     @Test func upstreamBypassesTheSystemProxyThatPointsBackAtUs() {
@@ -106,7 +143,10 @@ final class EchoServer: @unchecked Sendable {
                 conn.send(content: data, completion: .contentProcessed { _ in })
             }
             if isComplete || error != nil {
-                conn.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+                // Cancelling right after the FIN would drop buffered data.
+                conn.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in
+                    self.queue.asyncAfter(deadline: .now() + 5) { conn.cancel() }
+                })
                 return
             }
             self.echo(conn)

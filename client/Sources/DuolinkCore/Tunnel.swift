@@ -36,15 +36,20 @@ public final class Tunnel: @unchecked Sendable {
 
     public let options: Options
     private let relay: MultipathRelay
-    private let lock = OSAllocatedUnfairLock<Process?>(initialState: nil)
-    private var stopping = false
-    private var restarts = 0
+    private let onFailure: @Sendable (Error) -> Void
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
-    /// Called on an unexpected sing-box exit, after the automatic restarts gave up.
-    public var onFailure: (@Sendable (Error) -> Void)?
+    private struct State {
+        var process: Process?
+        var stopping = false
+        var restarts = 0
+        var launchedAt = Date.distantPast
+    }
 
-    public init(options: Options) {
+    /// `onFailure` runs when sing-box keeps exiting after the automatic restarts.
+    public init(options: Options, onFailure: @escaping @Sendable (Error) -> Void) {
         self.options = options
+        self.onFailure = onFailure
         relay = MultipathRelay(upstreamHost: options.server.host, upstreamPort: options.server.port, mode: options.mode)
     }
 
@@ -52,7 +57,9 @@ public final class Tunnel: @unchecked Sendable {
 
     private var configURL: URL { options.supportDirectory.appending(path: "sing-box.json") }
     private var pidURL: URL { options.supportDirectory.appending(path: "sing-box.pid") }
-    public var logURL: URL { options.supportDirectory.appending(path: "sing-box.log") }
+    public static func logURL(in supportDirectory: URL) -> URL { supportDirectory.appending(path: "sing-box.log") }
+    private var logURL: URL { Self.logURL(in: options.supportDirectory) }
+    private var isStopping: Bool { state.withLock { $0.stopping } }
 
     public func start() async throws {
         guard let binary = SingBoxBinary.locate() else { throw TunnelError.singBoxNotFound }
@@ -61,6 +68,8 @@ public final class Tunnel: @unchecked Sendable {
 
         _ = try await relay.start(port: options.relayPort)
         do {
+            // `stop()` may have run while the relay was starting.
+            if isStopping { throw CancellationError() }
             let config = try SingBoxConfig.client(
                 server: options.server,
                 relayPort: options.relayPort,
@@ -68,7 +77,9 @@ public final class Tunnel: @unchecked Sendable {
                 setSystemProxy: options.setSystemProxy
             )
             // The file holds the server password.
-            FileManager.default.createFile(atPath: configURL.path, contents: config, attributes: [.posixPermissions: 0o600])
+            guard FileManager.default.createFile(atPath: configURL.path, contents: config, attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: configURL.path])
+            }
             try launch(binary: binary)
         } catch {
             relay.stop()
@@ -77,17 +88,30 @@ public final class Tunnel: @unchecked Sendable {
     }
 
     /// Stops sing-box gracefully so it can restore the system proxy settings.
+    /// Blocks for up to 3 seconds: call `shutdown()` from the main thread.
     public func stop() {
-        stopping = true
-        if let process = lock.withLock({ $0 }), process.isRunning {
+        let process = state.withLock { state in
+            state.stopping = true
+            defer { state.process = nil }
+            return state.process
+        }
+        if let process, process.isRunning {
             process.terminate()
             let deadline = Date().addingTimeInterval(3)
             while process.isRunning, Date() < deadline { usleep(50_000) }
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         }
-        lock.withLock { $0 = nil }
         try? FileManager.default.removeItem(at: pidURL)
         relay.stop()
+    }
+
+    public func shutdown() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                self.stop()
+                continuation.resume()
+            }
+        }
     }
 
     private func launch(binary: URL) throws {
@@ -102,23 +126,43 @@ public final class Tunnel: @unchecked Sendable {
             try? log.close()
             self?.handleExit(of: process, binary: binary)
         }
-        try process.run()
-        lock.withLock { $0 = process }
+        do {
+            try process.run()
+        } catch {
+            try? log.close()
+            throw error
+        }
+        let orphaned = state.withLock { state in
+            if state.stopping { return true }
+            state.process = process
+            state.launchedAt = Date()
+            return false
+        }
+        if orphaned {
+            process.terminate()
+            throw CancellationError()
+        }
         try? String(process.processIdentifier).write(to: pidURL, atomically: true, encoding: .utf8)
     }
 
     private func handleExit(of process: Process, binary: URL) {
-        guard !stopping else { return }
-        let tail = (try? String(contentsOf: logURL, encoding: .utf8))?
-            .split(separator: "\n").suffix(3).joined(separator: "\n") ?? ""
-        restarts += 1
+        let restarts: Int? = state.withLock { state in
+            guard !state.stopping else { return nil }
+            // Only crashes in a quick loop count towards giving up.
+            if Date().timeIntervalSince(state.launchedAt) > 60 { state.restarts = 0 }
+            state.restarts += 1
+            return state.restarts
+        }
+        guard let restarts else { return }
         if restarts <= 3 {
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
-                guard let self, !self.stopping else { return }
-                do { try self.launch(binary: binary) } catch { self.onFailure?(error) }
+                guard let self, !self.isStopping else { return }
+                do { try self.launch(binary: binary) } catch is CancellationError {} catch { self.onFailure(error) }
             }
         } else {
-            onFailure?(TunnelError.singBoxExited(process.terminationStatus, tail))
+            let tail = (try? String(contentsOf: logURL, encoding: .utf8))?
+                .split(separator: "\n").suffix(3).joined(separator: "\n") ?? ""
+            onFailure(TunnelError.singBoxExited(process.terminationStatus, tail))
         }
     }
 

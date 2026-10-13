@@ -59,23 +59,15 @@ public enum AggregatePermission {
     }
 
     /// Runs the install script through the standard macOS admin password prompt.
-    public static func install(scratchDirectory: URL) throws {
-        try FileManager.default.createDirectory(
-            at: scratchDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let script = scratchDirectory.appending(path: "allow-aggregate.sh")
-        try installScript.write(to: script, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: script) }
-
+    /// The script travels as an argument, never as a file another process could swap.
+    public static func install() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = [
             "-e", "on run argv",
-            "-e", "do shell script \"/bin/sh \" & quoted form of item 1 of argv with administrator privileges",
+            "-e", "do shell script (item 1 of argv) with administrator privileges",
             "-e", "end run",
-            script.path,
+            installScript,
         ]
         let output = Pipe()
         process.standardError = output

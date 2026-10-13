@@ -27,3 +27,14 @@ public struct RateMeter: Sendable {
         return Double(delta) / (time - last.time)
     }
 }
+
+/// Download and upload rates, in bytes per second.
+public struct Throughput: Equatable, Sendable {
+    public var down: Double
+    public var up: Double
+
+    public init(down: Double = 0, up: Double = 0) {
+        self.down = down
+        self.up = up
+    }
+}

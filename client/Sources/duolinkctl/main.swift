@@ -23,8 +23,7 @@ var options = Tunnel.Options(
     supportDirectory: FileManager.default.temporaryDirectory.appending(path: "duolinkctl")
 )
 options.setSystemProxy = arguments.contains("--system-proxy")
-let tunnel = Tunnel(options: options)
-tunnel.onFailure = { error in
+let tunnel = Tunnel(options: options) { error in
     print("error: \(error.localizedDescription)")
     exit(1)
 }
