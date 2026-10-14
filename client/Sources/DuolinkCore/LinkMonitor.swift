@@ -71,12 +71,17 @@ public final class LinkMonitor: @unchecked Sendable {
     }
 
     static func kind(of interface: NWInterface, displayName: String) -> LinkStatus.Kind {
-        if displayName.localizedCaseInsensitiveContains("iphone") { return .iPhone }
+        if isIPhone(displayName: displayName) { return .iPhone }
         switch interface.type {
         case .wifi: return .wifi
         case .cellular: return .cellular
         default: return .ethernet
         }
+    }
+
+    /// Matches the port macOS creates for a USB-tethered iPhone, such as "iPhone USB".
+    static func isIPhone(displayName: String) -> Bool {
+        displayName.localizedCaseInsensitiveContains("iphone")
     }
 
     /// Byte counters per BSD interface. `if_data` holds 32-bit counters.

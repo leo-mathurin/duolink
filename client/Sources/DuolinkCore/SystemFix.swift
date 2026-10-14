@@ -11,23 +11,25 @@ import Foundation
 ///   of a 5G subflow climbs from about 20 ms to 200 ms, and 4 MB then limits
 ///   the whole MPTCP connection below the speed of the 5G alone. The cap goes
 ///   back to 4 MB at every reboot.
-public enum TetheringFix {
+public enum SystemFix {
     public static let daemonLabel = "io.github.leo-mathurin.duolink.tethering"
     static var daemonPath: String { "/Library/LaunchDaemons/\(daemonLabel).plist" }
 
     /// The most `kern.ipc.maxsockbuf` allows by default: a larger value has no effect.
     static let receiveBufferMax = 8 * 1024 * 1024
+    static let receiveBufferSysctl = "net.inet.tcp.autorcvbufmax"
 
     public enum Reason: Sendable {
         /// The iPhone is plugged in but macOS left its interface down.
         case tetheringDown
-        /// Two links are up but the receive window is too small to add them up.
+        /// The iPhone is up but the receive window is too small to add both links up.
         case smallReceiveBuffer
     }
 
     /// Why the daemon should be installed or updated, nil when nothing is needed.
+    /// A current daemon already applies every fix it can, so asking again would not help.
     public static func currentReason() -> Reason? {
-        guard !isCurrent(installedPlist: try? String(contentsOfFile: daemonPath, encoding: .utf8)) else { return nil }
+        if isCurrent(installedPlist: try? String(contentsOfFile: daemonPath, encoding: .utf8)) { return nil }
         return reason(ports: LinkMonitor.displayNames(), flags: readFlags(), receiveBuffer: readReceiveBufferMax())
     }
 
@@ -37,19 +39,17 @@ public enum TetheringFix {
 
     /// Only asks when an iPhone is plugged in: a single link gains nothing.
     static func reason(ports: [String: String], flags: [String: Int32], receiveBuffer: Int) -> Reason? {
-        let iPhones = ports
-            .filter { $0.value.localizedCaseInsensitiveContains("iphone") }
-            .compactMap { flags[$0.key] }
+        let iPhones = ports.filter { LinkMonitor.isIPhone(displayName: $0.value) }.compactMap { flags[$0.key] }
+        guard !iPhones.isEmpty else { return nil }
         if iPhones.contains(where: { $0 & Int32(IFF_UP) == 0 }) { return .tetheringDown }
-        if !iPhones.isEmpty, receiveBuffer < receiveBufferMax { return .smallReceiveBuffer }
-        return nil
+        return receiveBuffer < receiveBufferMax ? .smallReceiveBuffer : nil
     }
 
     static func readReceiveBufferMax() -> Int {
         var value: Int32 = 0
         var size = MemoryLayout<Int32>.size
         // Unreadable: assume it is fine rather than ask for a password.
-        guard sysctlbyname("net.inet.tcp.autorcvbufmax", &value, &size, nil, 0) == 0 else { return .max }
+        guard sysctlbyname(receiveBufferSysctl, &value, &size, nil, 0) == 0 else { return .max }
         return Int(value)
     }
 
@@ -80,14 +80,14 @@ public enum TetheringFix {
             ?*) ifconfig "$dev" up ;;
           esac
         done
-        buffer=$(sysctl -n net.inet.tcp.autorcvbufmax 2>/dev/null)
-        [ "${buffer:-0}" -ge \(receiveBufferMax) ] 2>/dev/null ||
-          sysctl -w net.inet.tcp.autorcvbufmax=\(receiveBufferMax) >/dev/null
+        [ "$(sysctl -n \(receiveBufferSysctl) 2>/dev/null)" -ge \(receiveBufferMax) ] 2>/dev/null ||
+          sysctl -w \(receiveBufferSysctl)=\(receiveBufferMax) >/dev/null
         exit 0
         """
     }
 
-    static var daemonPlist: String {
+    /// Built once: the menu compares it with the installed file every second.
+    static let daemonPlist: String = {
         let escaped = watchScript()
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -112,7 +112,7 @@ public enum TetheringFix {
         </dict>
         </plist>
         """
-    }
+    }()
 
     /// Shell script to run as root. Also printed by `duolinkctl fix-tethering`.
     /// Running it again replaces an older daemon.

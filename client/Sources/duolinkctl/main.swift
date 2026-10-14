@@ -5,7 +5,7 @@ import Foundation
 // receive window large enough to add both links up:
 //   duolinkctl fix-tethering | sudo sh
 if CommandLine.arguments.dropFirst().first == "fix-tethering" {
-    print(TetheringFix.installScript)
+    print(SystemFix.installScript)
     exit(0)
 }
 
