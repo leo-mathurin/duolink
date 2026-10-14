@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Testing
 @testable import DuolinkCore
@@ -6,24 +5,22 @@ import Testing
 @Suite struct SystemFixTests {
     let up = Int32(IFF_UP | IFF_RUNNING)
     let down = Int32(IFF_BROADCAST)
+    let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
 
     let big = SystemFix.receiveBufferMax
     let small = 4 * 1024 * 1024
 
     @Test func flagsAnIPhoneInterfaceThatMacOSLeftDown() {
         // A down interface comes first: there is no second link to add up yet.
-        let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
         #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en13": down], receiveBuffer: small) == .tetheringDown)
     }
 
     @Test func asksForABiggerReceiveBufferOnceTheIPhoneIsUp() {
-        let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
         #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en13": up], receiveBuffer: small) == .smallReceiveBuffer)
     }
 
     @Test func needsNothingWhenTheIPhoneIsUpAndTheBufferIsBigEnough() {
-        let ports = ["en13": "iPhone USB"]
-        #expect(SystemFix.reason(ports: ports, flags: ["en13": up], receiveBuffer: big) == nil)
+        #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en13": up], receiveBuffer: big) == nil)
     }
 
     @Test func needsNothingWithoutAnIPhone() {
@@ -55,20 +52,15 @@ import Testing
         #expect(arguments.first == "/bin/sh")
     }
 
-    @Test func watchScriptOnlyTouchesIPhonePorts() throws {
-        let calls = try runWatchScript(receiveBuffer: big)
-        #expect(calls == "up en13\n")
+    @Test func watchScriptOnlyTouchesIPhonePortsAndKeepsABigEnoughBuffer() throws {
+        // Someone who raised kern.ipc.maxsockbuf may already use more than 8 MB.
+        for receiveBuffer in [big, 2 * big] {
+            #expect(try runWatchScript(receiveBuffer: receiveBuffer) == "up en13\n")
+        }
     }
 
     @Test func watchScriptRaisesASmallReceiveBuffer() throws {
-        let calls = try runWatchScript(receiveBuffer: small)
-        #expect(calls == "up en13\nset net.inet.tcp.autorcvbufmax=\(big)\n")
-    }
-
-    @Test func watchScriptKeepsALargerReceiveBuffer() throws {
-        // Someone who raised kern.ipc.maxsockbuf may already use more than 8 MB.
-        let calls = try runWatchScript(receiveBuffer: 2 * big)
-        #expect(calls == "up en13\n")
+        #expect(try runWatchScript(receiveBuffer: small) == "up en13\nset net.inet.tcp.autorcvbufmax=\(big)\n")
     }
 
     /// Runs the script against fake tools and returns the changes it made.

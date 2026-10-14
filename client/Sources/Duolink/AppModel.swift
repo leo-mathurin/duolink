@@ -19,7 +19,6 @@ final class AppModel {
     private(set) var stats = RelayStats()
     private(set) var tunnelRates = Throughput()
     private(set) var notice: String?
-    /// Set when the root daemon must be installed or updated.
     private(set) var systemFix: SystemFix.Reason?
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 

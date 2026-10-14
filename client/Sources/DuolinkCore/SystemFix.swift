@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 /// Root fixes that Duolink needs and that macOS does not apply by itself. A
@@ -9,8 +8,7 @@ import Foundation
 ///   up` fixes it until the cable is plugged again.
 /// - macOS caps the receive window of a connection at 4 MB. Under load the RTT
 ///   of a 5G subflow climbs from about 20 ms to 200 ms, and 4 MB then limits
-///   the whole MPTCP connection below the speed of the 5G alone. The cap goes
-///   back to 4 MB at every reboot.
+///   the whole MPTCP connection below the speed of the 5G alone.
 public enum SystemFix {
     public static let daemonLabel = "io.github.leo-mathurin.duolink.tethering"
     static var daemonPath: String { "/Library/LaunchDaemons/\(daemonLabel).plist" }
@@ -30,7 +28,8 @@ public enum SystemFix {
     /// A current daemon already applies every fix it can, so asking again would not help.
     public static func currentReason() -> Reason? {
         if isCurrent(installedPlist: try? String(contentsOfFile: daemonPath, encoding: .utf8)) { return nil }
-        return reason(ports: LinkMonitor.displayNames(), flags: readFlags(), receiveBuffer: readReceiveBufferMax())
+        let flags = LinkMonitor.linkLayer { Int32(bitPattern: $0.ifa_flags) }
+        return reason(ports: LinkMonitor.displayNames(), flags: flags, receiveBuffer: readReceiveBufferMax())
     }
 
     static func isCurrent(installedPlist: String?) -> Bool {
@@ -39,7 +38,7 @@ public enum SystemFix {
 
     /// Only asks when an iPhone is plugged in: a single link gains nothing.
     static func reason(ports: [String: String], flags: [String: Int32], receiveBuffer: Int) -> Reason? {
-        let iPhones = ports.filter { LinkMonitor.isIPhone(displayName: $0.value) }.compactMap { flags[$0.key] }
+        let iPhones = ports.filter { $0.value.localizedCaseInsensitiveContains("iphone") }.compactMap { flags[$0.key] }
         guard !iPhones.isEmpty else { return nil }
         if iPhones.contains(where: { $0 & Int32(IFF_UP) == 0 }) { return .tetheringDown }
         return receiveBuffer < receiveBufferMax ? .smallReceiveBuffer : nil
@@ -51,20 +50,6 @@ public enum SystemFix {
         // Unreadable: assume it is fine rather than ask for a password.
         guard sysctlbyname(receiveBufferSysctl, &value, &size, nil, 0) == 0 else { return .max }
         return Int(value)
-    }
-
-    static func readFlags() -> [String: Int32] {
-        var result: [String: Int32] = [:]
-        var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0 else { return result }
-        defer { freeifaddrs(head) }
-        var cursor = head
-        while let entry = cursor?.pointee {
-            defer { cursor = entry.ifa_next }
-            guard entry.ifa_addr?.pointee.sa_family == UInt8(AF_LINK) else { continue }
-            result[String(cString: entry.ifa_name)] = Int32(bitPattern: entry.ifa_flags)
-        }
-        return result
     }
 
     /// The check the daemon runs. `extraPath` lets tests swap in fake tools.
@@ -115,7 +100,6 @@ public enum SystemFix {
     }()
 
     /// Shell script to run as root. Also printed by `duolinkctl fix-tethering`.
-    /// Running it again replaces an older daemon.
     public static var installScript: String {
         """
         set -e
