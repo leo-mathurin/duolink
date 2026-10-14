@@ -72,12 +72,12 @@ struct MenuView: View {
                 }
                 .font(.callout)
             }
-            if let fix = model.systemFix {
+            if let fix = model.systemFix?.copy {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(fix.message)
                         .font(.caption)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(fix.action) { model.installSystemFix() }
+                    Button(fix.action + " (mot de passe admin, une seule fois)") { model.installSystemFix() }
                         .controlSize(.small)
                 }
                 .padding(8)
@@ -110,7 +110,6 @@ struct MenuView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
 
             if model.serverUnreachable {
                 Text("Le serveur ne répond pas. Les apps qui passent par Duolink n'ont plus Internet : vérifiez le VPS ou désactivez Duolink.")
@@ -204,18 +203,10 @@ extension MultipathMode {
 }
 
 private extension SystemFix.Reason {
-    var message: String {
+    var copy: (message: String, action: String) {
         switch self {
-        case .tetheringDown: "L'iPhone est branché, mais macOS laisse sa connexion USB éteinte."
-        case .smallReceiveBuffer: "macOS limite la mémoire de chaque connexion : le Wi-Fi et l'iPhone ne s'additionnent pas pleinement."
+        case .tetheringDown: ("L'iPhone est branché, mais macOS laisse sa connexion USB éteinte.", "Réparer")
+        case .smallReceiveBuffer: ("macOS limite la mémoire de chaque connexion : le Wi-Fi et l'iPhone ne s'additionnent pas pleinement.", "Optimiser")
         }
-    }
-
-    var action: String {
-        let verb = switch self {
-        case .tetheringDown: "Réparer"
-        case .smallReceiveBuffer: "Optimiser"
-        }
-        return "\(verb) (mot de passe admin, une seule fois)"
     }
 }

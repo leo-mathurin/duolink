@@ -1,8 +1,7 @@
 import DuolinkCore
 import Foundation
 
-// Prints the root script that keeps the iPhone USB interface up and the
-// receive window large enough to add both links up:
+// Prints the root script behind the menu's Réparer and Optimiser buttons:
 //   duolinkctl fix-tethering | sudo sh
 if CommandLine.arguments.dropFirst().first == "fix-tethering" {
     print(SystemFix.installScript)

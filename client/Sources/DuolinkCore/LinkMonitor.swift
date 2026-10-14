@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Network
 import SystemConfiguration
@@ -71,7 +70,7 @@ public final class LinkMonitor: @unchecked Sendable {
     }
 
     static func kind(of interface: NWInterface, displayName: String) -> LinkStatus.Kind {
-        if isIPhone(displayName: displayName) { return .iPhone }
+        if displayName.localizedCaseInsensitiveContains("iphone") { return .iPhone }
         switch interface.type {
         case .wifi: return .wifi
         case .cellular: return .cellular
@@ -79,24 +78,27 @@ public final class LinkMonitor: @unchecked Sendable {
         }
     }
 
-    /// Matches the port macOS creates for a USB-tethered iPhone, such as "iPhone USB".
-    static func isIPhone(displayName: String) -> Bool {
-        displayName.localizedCaseInsensitiveContains("iphone")
-    }
-
     /// Byte counters per BSD interface. `if_data` holds 32-bit counters.
     static func readCounters() -> [String: (received: UInt64, sent: UInt64)] {
-        var result: [String: (UInt64, UInt64)] = [:]
+        linkLayer { entry in
+            entry.ifa_data.map {
+                let data = $0.assumingMemoryBound(to: if_data.self).pointee
+                return (UInt64(data.ifi_ibytes), UInt64(data.ifi_obytes))
+            }
+        }
+    }
+
+    /// Reads a value from the link-layer `getifaddrs` entry of each BSD interface.
+    static func linkLayer<Value>(_ read: (ifaddrs) -> Value?) -> [String: Value] {
+        var result: [String: Value] = [:]
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0 else { return result }
         defer { freeifaddrs(head) }
         var cursor = head
         while let entry = cursor?.pointee {
             defer { cursor = entry.ifa_next }
-            guard let address = entry.ifa_addr, address.pointee.sa_family == UInt8(AF_LINK),
-                  let raw = entry.ifa_data else { continue }
-            let data = raw.assumingMemoryBound(to: if_data.self).pointee
-            result[String(cString: entry.ifa_name)] = (UInt64(data.ifi_ibytes), UInt64(data.ifi_obytes))
+            guard entry.ifa_addr?.pointee.sa_family == UInt8(AF_LINK), let value = read(entry) else { continue }
+            result[String(cString: entry.ifa_name)] = value
         }
         return result
     }
