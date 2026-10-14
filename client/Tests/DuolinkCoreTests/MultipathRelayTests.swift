@@ -25,6 +25,25 @@ import Testing
         #expect(relay.stats.connectionsOpened == 1)
     }
 
+    @Test func deliversTheWholeReplyOnManyConcurrentConnections() async throws {
+        // Network.framework can report a finished upstream as failed before the
+        // relay has flushed the last bytes to the client; they must not be lost.
+        let echo = try await EchoServer.start()
+        defer { echo.stop() }
+        let relay = MultipathRelay(upstreamHost: "127.0.0.1", upstreamPort: echo.port, mode: .disabled)
+        let port = try await relay.start(port: 0)
+        defer { relay.stop() }
+
+        let payload = Data((0..<200_000).map { UInt8($0 % 251) })
+        let sizes = try await withThrowingTaskGroup(of: Int.self) { group in
+            for _ in 0..<50 {
+                group.addTask { try await LoopbackClient.roundTrip(port: port, payload: payload).count }
+            }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(sizes.filter { $0 != payload.count }.isEmpty)
+    }
+
     @Test func dropsTheClientWhenTheUpstreamIsUnreachable() async throws {
         // Port 1 on loopback refuses connections.
         let relay = MultipathRelay(upstreamHost: "127.0.0.1", upstreamPort: 1, mode: .disabled)
