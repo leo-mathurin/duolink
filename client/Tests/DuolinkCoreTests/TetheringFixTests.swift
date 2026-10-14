@@ -7,24 +7,40 @@ import Testing
     let up = Int32(IFF_UP | IFF_RUNNING)
     let down = Int32(IFF_BROADCAST)
 
+    let big = TetheringFix.receiveBufferMax
+    let small = 4 * 1024 * 1024
+
     @Test func flagsAnIPhoneInterfaceThatMacOSLeftDown() {
         let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
-        #expect(TetheringFix.interfacesLeftDown(ports: ports, flags: ["en0": up, "en13": down]) == ["en13"])
+        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en13": down], receiveBuffer: big) == .tetheringDown)
     }
 
-    @Test func ignoresAnIPhoneInterfaceThatIsAlreadyUp() {
+    @Test func asksForABiggerReceiveBufferOnceTheIPhoneIsUp() {
+        let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
+        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en13": up], receiveBuffer: small) == .smallReceiveBuffer)
+    }
+
+    @Test func needsNothingWhenTheIPhoneIsUpAndTheBufferIsBigEnough() {
         let ports = ["en13": "iPhone USB"]
-        #expect(TetheringFix.interfacesLeftDown(ports: ports, flags: ["en13": up]).isEmpty)
+        #expect(TetheringFix.reason(ports: ports, flags: ["en13": up], receiveBuffer: big) == nil)
     }
 
-    @Test func ignoresOtherInterfacesThatAreDown() {
-        let ports = ["en5": "Ethernet Adapter (en5)", "en13": "iPhone USB"]
-        #expect(TetheringFix.interfacesLeftDown(ports: ports, flags: ["en5": down, "en13": up]).isEmpty)
+    @Test func needsNothingWithoutAnIPhone() {
+        // A single link gains nothing from a bigger buffer: no password prompt.
+        let ports = ["en0": "Wi-Fi", "en5": "Ethernet Adapter (en5)"]
+        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en5": down], receiveBuffer: small) == nil)
     }
 
     @Test func ignoresAPortWithNoKernelInterface() {
         // A stale service from a previous iPhone: the port exists, the interface does not.
-        #expect(TetheringFix.interfacesLeftDown(ports: ["en7": "iPhone USB"], flags: [:]).isEmpty)
+        #expect(TetheringFix.reason(ports: ["en7": "iPhone USB"], flags: [:], receiveBuffer: small) == nil)
+    }
+
+    @Test func recognisesTheDaemonItInstalled() {
+        // The install script writes the plist through a heredoc, which adds a newline.
+        #expect(TetheringFix.isCurrent(installedPlist: TetheringFix.daemonPlist + "\n"))
+        #expect(!TetheringFix.isCurrent(installedPlist: "<plist>older version</plist>"))
+        #expect(!TetheringFix.isCurrent(installedPlist: nil))
     }
 
     @Test func daemonPlistIsValid() throws {
@@ -39,7 +55,17 @@ import Testing
     }
 
     @Test func watchScriptOnlyTouchesIPhonePorts() throws {
-        // Runs the script against fake tools: it must bring up en13 only.
+        let calls = try runWatchScript(receiveBuffer: big)
+        #expect(calls == "up en13\n")
+    }
+
+    @Test func watchScriptRaisesASmallReceiveBuffer() throws {
+        let calls = try runWatchScript(receiveBuffer: small)
+        #expect(calls == "up en13\nset net.inet.tcp.autorcvbufmax=\(big)\n")
+    }
+
+    /// Runs the script against fake tools and returns the changes it made.
+    private func runWatchScript(receiveBuffer: Int) throws -> String {
         let bin = FileManager.default.temporaryDirectory.appending(path: "duolink-bin-\(UUID())")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: bin) }
@@ -57,6 +83,11 @@ import Testing
               *) echo "$1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500" ;;
             esac
             """,
+            "sysctl": """
+            #!/bin/sh
+            if [ "$1" = -w ]; then echo "set $2" >> "\(log.path)"; exit 0; fi
+            echo \(receiveBuffer)
+            """,
         ]
         for (name, body) in fakes {
             let url = bin.appending(path: name)
@@ -69,8 +100,7 @@ import Testing
         process.arguments = ["-c", TetheringFix.watchScript(toolsDirectory: bin.path)]
         try process.run()
         process.waitUntilExit()
-
         #expect(process.terminationStatus == 0)
-        #expect(try String(contentsOf: log, encoding: .utf8) == "up en13\n")
+        return (try? String(contentsOf: log, encoding: .utf8)) ?? ""
     }
 }

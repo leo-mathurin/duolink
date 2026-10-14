@@ -1,28 +1,56 @@
 import Darwin
 import Foundation
 
-/// macOS 26 attaches the "iPhone USB" interface but never sets it UP, so the
-/// iPhone never turns the link on and DHCP never starts. `ifconfig <if> up`
-/// fixes it until the cable is plugged again, and needs root. A LaunchDaemon
-/// therefore checks every few seconds and brings those interfaces up.
+/// Root fixes that Duolink needs and that macOS does not apply by itself. A
+/// LaunchDaemon runs them every few seconds, since both reset on their own.
+///
+/// - macOS 26 attaches the "iPhone USB" interface but never sets it UP, so
+///   the iPhone never turns the link on and DHCP never starts. `ifconfig <if>
+///   up` fixes it until the cable is plugged again.
+/// - macOS caps the receive window of a connection at 4 MB. Under load the RTT
+///   of a 5G subflow climbs from about 20 ms to 200 ms, and 4 MB then limits
+///   the whole MPTCP connection below the speed of the 5G alone. The cap goes
+///   back to 4 MB at every reboot.
 public enum TetheringFix {
     public static let daemonLabel = "io.github.leo-mathurin.duolink.tethering"
     static var daemonPath: String { "/Library/LaunchDaemons/\(daemonLabel).plist" }
 
-    public static var isInstalled: Bool { FileManager.default.fileExists(atPath: daemonPath) }
+    /// The most `kern.ipc.maxsockbuf` allows by default: a larger value has no effect.
+    static let receiveBufferMax = 8 * 1024 * 1024
 
-    /// iPhone USB interfaces that exist in the kernel but are down.
-    static func interfacesLeftDown(ports: [String: String], flags: [String: Int32]) -> [String] {
-        ports
-            .filter { $0.value.localizedCaseInsensitiveContains("iphone") }
-            .compactMap { bsd, _ in flags[bsd].map { (bsd, $0) } }
-            .filter { $0.1 & Int32(IFF_UP) == 0 }
-            .map(\.0)
-            .sorted()
+    public enum Reason: Sendable {
+        /// The iPhone is plugged in but macOS left its interface down.
+        case tetheringDown
+        /// Two links are up but the receive window is too small to add them up.
+        case smallReceiveBuffer
     }
 
-    public static func currentInterfacesLeftDown() -> [String] {
-        interfacesLeftDown(ports: LinkMonitor.displayNames(), flags: readFlags())
+    /// Why the daemon should be installed or updated, nil when nothing is needed.
+    public static func currentReason() -> Reason? {
+        guard !isCurrent(installedPlist: try? String(contentsOfFile: daemonPath, encoding: .utf8)) else { return nil }
+        return reason(ports: LinkMonitor.displayNames(), flags: readFlags(), receiveBuffer: readReceiveBufferMax())
+    }
+
+    static func isCurrent(installedPlist: String?) -> Bool {
+        installedPlist?.trimmingCharacters(in: .whitespacesAndNewlines) == daemonPlist
+    }
+
+    /// Only asks when an iPhone is plugged in: a single link gains nothing.
+    static func reason(ports: [String: String], flags: [String: Int32], receiveBuffer: Int) -> Reason? {
+        let iPhones = ports
+            .filter { $0.value.localizedCaseInsensitiveContains("iphone") }
+            .compactMap { flags[$0.key] }
+        if iPhones.contains(where: { $0 & Int32(IFF_UP) == 0 }) { return .tetheringDown }
+        if !iPhones.isEmpty, receiveBuffer < receiveBufferMax { return .smallReceiveBuffer }
+        return nil
+    }
+
+    static func readReceiveBufferMax() -> Int {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        // Unreadable: assume it is fine rather than ask for a password.
+        guard sysctlbyname("net.inet.tcp.autorcvbufmax", &value, &size, nil, 0) == 0 else { return .max }
+        return Int(value)
     }
 
     static func readFlags() -> [String: Int32] {
@@ -52,6 +80,9 @@ public enum TetheringFix {
             ?*) ifconfig "$dev" up ;;
           esac
         done
+        buffer=$(sysctl -n net.inet.tcp.autorcvbufmax 2>/dev/null)
+        [ "${buffer:-0}" -ge \(receiveBufferMax) ] 2>/dev/null ||
+          sysctl -w net.inet.tcp.autorcvbufmax=\(receiveBufferMax) >/dev/null
         exit 0
         """
     }
@@ -84,6 +115,7 @@ public enum TetheringFix {
     }
 
     /// Shell script to run as root. Also printed by `duolinkctl fix-tethering`.
+    /// Running it again replaces an older daemon.
     public static var installScript: String {
         """
         set -e
