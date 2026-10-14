@@ -19,8 +19,8 @@ final class AppModel {
     private(set) var stats = RelayStats()
     private(set) var tunnelRates = Throughput()
     private(set) var notice: String?
-    /// The iPhone is plugged in but macOS left its interface down.
-    private(set) var tetheringBlocked = false
+    /// Set when the root daemon must be installed or updated.
+    private(set) var systemFix: TetheringFix.Reason?
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var mode: MultipathMode {
@@ -132,7 +132,7 @@ final class AppModel {
     }
 
     private func tick() {
-        tetheringBlocked = !TetheringFix.isInstalled && !TetheringFix.currentInterfacesLeftDown().isEmpty
+        systemFix = TetheringFix.currentReason()
         guard let tunnel else { return }
         stats = tunnel.relayStats
         let now = ProcessInfo.processInfo.systemUptime

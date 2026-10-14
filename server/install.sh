@@ -36,14 +36,19 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now duolink-mptcp.service >/dev/null
 sudo systemctl restart duolink-mptcp.service
 
-if [[ "$ENABLE_BBR" == "1" ]]; then
-  log "BBR congestion control (better on lossy cellular links)"
-  sudo tee /etc/sysctl.d/90-duolink.conf >/dev/null <<'EOF'
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
-  sudo sysctl -q --system
-fi
+log "TCP tuning"
+{
+  # MPTCP shares one send buffer between subflows. When a 5G subflow is
+  # loaded its RTT climbs to about 200 ms, and the 4 MB default keeps the
+  # server waiting instead of feeding both links.
+  echo "net.ipv4.tcp_wmem = 4096 16384 16777216"
+  if [[ "$ENABLE_BBR" == "1" ]]; then
+    # BBR copes better with lossy cellular links.
+    echo "net.core.default_qdisc = fq"
+    echo "net.ipv4.tcp_congestion_control = bbr"
+  fi
+} | sudo tee /etc/sysctl.d/90-duolink.conf >/dev/null
+sudo sysctl -q --system
 
 log "Firewall: allow TCP $PORT"
 rule=(-p tcp -m tcp --dport "$PORT" -m comment --comment duolink -j ACCEPT)

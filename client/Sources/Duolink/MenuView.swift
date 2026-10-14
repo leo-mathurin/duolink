@@ -72,12 +72,12 @@ struct MenuView: View {
                 }
                 .font(.callout)
             }
-            if model.tetheringBlocked {
+            if let fix = model.systemFix {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("L'iPhone est branché, mais macOS laisse sa connexion USB éteinte.")
+                    Text(fix.message)
                         .font(.caption)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Réparer (mot de passe admin, une seule fois)") { model.fixTethering() }
+                    Button(fix.action) { model.fixTethering() }
                         .controlSize(.small)
                 }
                 .padding(8)
@@ -199,6 +199,22 @@ extension MultipathMode {
         case .combine: "Utilise toutes les connexions : les téléchargements additionnent leur débit."
         case .backup: "Utilise une seule connexion et bascule sans coupure si elle tombe. Économise le forfait."
         case .disabled: ""
+        }
+    }
+}
+
+private extension TetheringFix.Reason {
+    var message: String {
+        switch self {
+        case .tetheringDown: "L'iPhone est branché, mais macOS laisse sa connexion USB éteinte."
+        case .smallReceiveBuffer: "macOS limite la mémoire de chaque connexion : le Wi-Fi et l'iPhone ne s'additionnent pas pleinement."
+        }
+    }
+
+    var action: String {
+        switch self {
+        case .tetheringDown: "Réparer (mot de passe admin, une seule fois)"
+        case .smallReceiveBuffer: "Optimiser (mot de passe admin, une seule fois)"
         }
     }
 }

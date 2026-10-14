@@ -53,6 +53,7 @@ cd duolink/server
 Le script :
 
 - règle les limites MPTCP (8 sous-flux) avec un service systemd ;
+- porte le tampon d'envoi TCP à 16 Mo, pour que le serveur alimente les deux liens à la fois ;
 - active BBR, plus efficace sur les liens cellulaires qui perdent des paquets (`ENABLE_BBR=0` pour ne pas le faire) ;
 - ouvre le port dans iptables, y compris dans `/etc/iptables/rules.v4` ;
 - génère un mot de passe et lance sing-box dans Docker, en réseau `host` pour garder le MPTCP de bout en bout ;
@@ -84,6 +85,8 @@ Puis, dans le menu Duolink :
 1. Connectez-vous au Wi-Fi du train et validez son portail. Le portail `wifi.sncf` reste joignable quand Duolink est actif.
 2. Activez le partage de connexion sur l'iPhone et branchez-le **en USB**. Le Mac n'a qu'une carte Wi-Fi : il ne peut pas rejoindre deux réseaux Wi-Fi en même temps.
    Sur macOS 26, l'interface « iPhone USB » peut rester éteinte : le Mac la crée mais ne l'active jamais, et l'iPhone ne démarre pas le partage. Duolink le détecte et propose **Réparer** (mot de passe administrateur, une seule fois). Cela installe un LaunchDaemon qui active cette interface dès qu'elle apparaît. À la main : `dist/duolinkctl fix-tethering | sudo sh`.
+
+   Le même LaunchDaemon agrandit la fenêtre de réception TCP de macOS, de 4 à 8 Mo. Sous charge, le RTT de la 5G passe d'environ 20 à 200 ms, et 4 Mo ne suffisent plus : Duolink était alors plus lent que la 5G seule. Quand l'iPhone est branché et que ce réglage manque, le menu propose **Optimiser**. macOS remet la valeur par défaut à chaque redémarrage, le LaunchDaemon la rétablit.
 3. Les deux liens apparaissent dans le menu avec leur débit. Pendant un téléchargement, les deux doivent bouger. Ces compteurs incluent aussi le trafic hors tunnel : pour une preuve stricte, `ss -Mni` sur le VPS montre les sous-flux de chaque connexion.
 
 Si le Wi-Fi est connecté mais sans Internet (portail pas encore validé, tunnel, liaison du train coupée), une connexion qui n'aboutit pas en 2,5 secondes est relancée en évitant cette interface, donc via l'iPhone. Le Wi-Fi rejoint la connexion plus tard s'il revient.
@@ -105,7 +108,7 @@ macOS propose un mode MPTCP « aggregate », réservé aux apps tierces après u
 
 - **Seules les apps qui respectent le proxy système passent par le tunnel** : navigateurs, la plupart des apps macOS, `curl` avec `-x`. Les autres sortent en direct, sans agrégation.
 - **L'UDP passe dans le flux TCP** (UDP over TCP). Il est agrégé, mais un appel vidéo en UDP peut subir plus de latence qu'en direct. Les navigateurs n'utilisent pas QUIC à travers un proxy, ils restent donc en TCP agrégé.
-- **Le gain dépend du réseau.** Le Wi-Fi du train est lui-même une liaison 4G sur le toit, et il traverse les mêmes tunnels et zones blanches que votre téléphone. Le gain le plus visible est la continuité : quand un lien tombe, les connexions continuent sur l'autre.
+- **Le gain dépend du réseau.** Le Wi-Fi du train est lui-même une liaison 4G sur le toit, et il traverse les mêmes tunnels et zones blanches que votre téléphone. Le gain le plus visible est la continuité : quand un lien tombe, les connexions continuent sur l'autre. Mesuré avec un Wi-Fi à 11 Mo/s et une 5G entre 20 et 24 Mo/s : Duolink atteint 26 à 32 Mo/s, environ 30 % de plus que la 5G seule.
 - **Portails captifs** : seuls `wifi.sncf`, `captive.apple.com`, les domaines `.local` et les adresses privées restent en direct. Sur un autre réseau, désactivez Duolink le temps de valider le portail.
 - **Les envois ne s'additionnent pas** : un upload passe par une seule connexion à la fois (voir plus haut). Il bascule sur l'autre si elle est plus rapide ou si elle tombe.
 - **Le forfait de l'iPhone est consommé** en mode Combiner. Passez en mode Secours pour l'économiser.
@@ -128,7 +131,7 @@ Pour vérifier que le serveur reçoit bien du MPTCP : `ss -Mni` sur le VPS liste
 rm -rf /Applications/Duolink.app ~/Library/Application\ Support/Duolink
 ```
 
-Si vous avez utilisé **Réparer** :
+Si vous avez utilisé **Réparer** ou **Optimiser** :
 
 ```sh
 sudo launchctl bootout system/io.github.leo-mathurin.duolink.tethering
