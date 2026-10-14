@@ -20,7 +20,7 @@ final class AppModel {
     private(set) var tunnelRates = Throughput()
     private(set) var notice: String?
     /// Set when the root daemon must be installed or updated.
-    private(set) var systemFix: TetheringFix.Reason?
+    private(set) var systemFix: SystemFix.Reason?
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var mode: MultipathMode {
@@ -132,7 +132,7 @@ final class AppModel {
     }
 
     private func tick() {
-        systemFix = TetheringFix.currentReason()
+        systemFix = SystemFix.currentReason()
         guard let tunnel else { return }
         stats = tunnel.relayStats
         let now = ProcessInfo.processInfo.systemUptime
@@ -161,10 +161,10 @@ final class AppModel {
         }
     }
 
-    func fixTethering() {
+    func installSystemFix() {
         Task.detached {
             do {
-                try TetheringFix.install()
+                try SystemFix.install()
             } catch {
                 await MainActor.run { self.notice = error.localizedDescription }
             }

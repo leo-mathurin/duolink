@@ -3,52 +3,53 @@ import Foundation
 import Testing
 @testable import DuolinkCore
 
-@Suite struct TetheringFixTests {
+@Suite struct SystemFixTests {
     let up = Int32(IFF_UP | IFF_RUNNING)
     let down = Int32(IFF_BROADCAST)
 
-    let big = TetheringFix.receiveBufferMax
+    let big = SystemFix.receiveBufferMax
     let small = 4 * 1024 * 1024
 
     @Test func flagsAnIPhoneInterfaceThatMacOSLeftDown() {
+        // A down interface comes first: there is no second link to add up yet.
         let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
-        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en13": down], receiveBuffer: big) == .tetheringDown)
+        #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en13": down], receiveBuffer: small) == .tetheringDown)
     }
 
     @Test func asksForABiggerReceiveBufferOnceTheIPhoneIsUp() {
         let ports = ["en0": "Wi-Fi", "en13": "iPhone USB"]
-        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en13": up], receiveBuffer: small) == .smallReceiveBuffer)
+        #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en13": up], receiveBuffer: small) == .smallReceiveBuffer)
     }
 
     @Test func needsNothingWhenTheIPhoneIsUpAndTheBufferIsBigEnough() {
         let ports = ["en13": "iPhone USB"]
-        #expect(TetheringFix.reason(ports: ports, flags: ["en13": up], receiveBuffer: big) == nil)
+        #expect(SystemFix.reason(ports: ports, flags: ["en13": up], receiveBuffer: big) == nil)
     }
 
     @Test func needsNothingWithoutAnIPhone() {
         // A single link gains nothing from a bigger buffer: no password prompt.
         let ports = ["en0": "Wi-Fi", "en5": "Ethernet Adapter (en5)"]
-        #expect(TetheringFix.reason(ports: ports, flags: ["en0": up, "en5": down], receiveBuffer: small) == nil)
+        #expect(SystemFix.reason(ports: ports, flags: ["en0": up, "en5": down], receiveBuffer: small) == nil)
     }
 
     @Test func ignoresAPortWithNoKernelInterface() {
         // A stale service from a previous iPhone: the port exists, the interface does not.
-        #expect(TetheringFix.reason(ports: ["en7": "iPhone USB"], flags: [:], receiveBuffer: small) == nil)
+        #expect(SystemFix.reason(ports: ["en7": "iPhone USB"], flags: [:], receiveBuffer: small) == nil)
     }
 
     @Test func recognisesTheDaemonItInstalled() {
         // The install script writes the plist through a heredoc, which adds a newline.
-        #expect(TetheringFix.isCurrent(installedPlist: TetheringFix.daemonPlist + "\n"))
-        #expect(!TetheringFix.isCurrent(installedPlist: "<plist>older version</plist>"))
-        #expect(!TetheringFix.isCurrent(installedPlist: nil))
+        #expect(SystemFix.isCurrent(installedPlist: SystemFix.daemonPlist + "\n"))
+        #expect(!SystemFix.isCurrent(installedPlist: "<plist>older version</plist>"))
+        #expect(!SystemFix.isCurrent(installedPlist: nil))
     }
 
     @Test func daemonPlistIsValid() throws {
         let file = FileManager.default.temporaryDirectory.appending(path: "duolink-\(UUID()).plist")
-        try TetheringFix.daemonPlist.write(to: file, atomically: true, encoding: .utf8)
+        try SystemFix.daemonPlist.write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         let plist = try #require(NSDictionary(contentsOf: file) as? [String: Any])
-        #expect(plist["Label"] as? String == TetheringFix.daemonLabel)
+        #expect(plist["Label"] as? String == SystemFix.daemonLabel)
         #expect(plist["StartInterval"] as? Int == 5)
         let arguments = try #require(plist["ProgramArguments"] as? [String])
         #expect(arguments.first == "/bin/sh")
@@ -62,6 +63,12 @@ import Testing
     @Test func watchScriptRaisesASmallReceiveBuffer() throws {
         let calls = try runWatchScript(receiveBuffer: small)
         #expect(calls == "up en13\nset net.inet.tcp.autorcvbufmax=\(big)\n")
+    }
+
+    @Test func watchScriptKeepsALargerReceiveBuffer() throws {
+        // Someone who raised kern.ipc.maxsockbuf may already use more than 8 MB.
+        let calls = try runWatchScript(receiveBuffer: 2 * big)
+        #expect(calls == "up en13\n")
     }
 
     /// Runs the script against fake tools and returns the changes it made.
@@ -97,7 +104,7 @@ import Testing
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", TetheringFix.watchScript(toolsDirectory: bin.path)]
+        process.arguments = ["-c", SystemFix.watchScript(toolsDirectory: bin.path)]
         try process.run()
         process.waitUntilExit()
         #expect(process.terminationStatus == 0)

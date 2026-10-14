@@ -77,7 +77,7 @@ struct MenuView: View {
                     Text(fix.message)
                         .font(.caption)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(fix.action) { model.fixTethering() }
+                    Button(fix.action) { model.installSystemFix() }
                         .controlSize(.small)
                 }
                 .padding(8)
@@ -203,7 +203,7 @@ extension MultipathMode {
     }
 }
 
-private extension TetheringFix.Reason {
+private extension SystemFix.Reason {
     var message: String {
         switch self {
         case .tetheringDown: "L'iPhone est branché, mais macOS laisse sa connexion USB éteinte."
@@ -212,9 +212,10 @@ private extension TetheringFix.Reason {
     }
 
     var action: String {
-        switch self {
-        case .tetheringDown: "Réparer (mot de passe admin, une seule fois)"
-        case .smallReceiveBuffer: "Optimiser (mot de passe admin, une seule fois)"
+        let verb = switch self {
+        case .tetheringDown: "Réparer"
+        case .smallReceiveBuffer: "Optimiser"
         }
+        return "\(verb) (mot de passe admin, une seule fois)"
     }
 }
