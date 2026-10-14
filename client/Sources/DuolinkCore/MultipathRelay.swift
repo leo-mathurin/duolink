@@ -188,11 +188,10 @@ private final class RelayPair: @unchecked Sendable {
     }
 
     func start() {
+        // Only the client is watched: the upstream's pump sees its failure
+        // after it has delivered every byte received before it.
         inbound.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .failed, .cancelled: self?.close()
-            default: break
-            }
+            if case .failed = state, let self { self.drain(after: self.inbound) }
         }
         inbound.start(queue: queue)
         dialer.dial { [weak self] result in
@@ -201,12 +200,6 @@ private final class RelayPair: @unchecked Sendable {
             case .success(let outbound):
                 self.outbound = outbound
                 self.onConnected?()
-                outbound.stateUpdateHandler = { [weak self] state in
-                    switch state {
-                    case .failed, .cancelled: self?.close()
-                    default: break
-                    }
-                }
                 self.pump(from: self.inbound, to: outbound, direction: .up)
                 self.pump(from: outbound, to: self.inbound, direction: .down)
             case .failure(let error):
@@ -222,7 +215,7 @@ private final class RelayPair: @unchecked Sendable {
                 if isComplete {
                     self.finish(sink)
                 } else if error != nil {
-                    self.close()
+                    self.drain(after: source)
                 } else {
                     self.pump(from: source, to: sink, direction: direction)
                 }
@@ -244,6 +237,17 @@ private final class RelayPair: @unchecked Sendable {
             self.finishedDirections += 1
             if self.finishedDirections == 2 { self.close(linger: true) }
         })
+    }
+
+    /// Network.framework can report a connection that the peer closed cleanly
+    /// as failed instead of delivering its FIN. Cancelling the other side then
+    /// would drop the bytes still in its send buffer, so it gets them and a
+    /// FIN instead.
+    private func drain(after failed: NWConnection) {
+        guard !closed else { return }
+        let other = failed === inbound ? outbound : inbound
+        other?.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+        close(linger: other != nil)
     }
 
     /// `linger` keeps the connections alive for a while after a clean close:
