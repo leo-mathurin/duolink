@@ -10,12 +10,13 @@ public enum SingBoxConfig {
     public static let proxyTag = "duolink"
     public static let directTag = "direct"
 
-    /// Hosts that must stay on the local network: captive portal login pages
-    /// only answer from inside the train network, never through the server.
+    /// Captive portals need the local network, and tailnet services need this
+    /// Mac's Tailscale identity rather than the proxy server's.
     public static let directDomainSuffixes = [
         "local",
         "captive.apple.com",
         "wifi.sncf",
+        "ts.net",
     ]
 
     public static func client(
@@ -27,7 +28,10 @@ public enum SingBoxConfig {
         let config: [String: Any] = [
             "log": ["level": "warn", "timestamp": true],
             "dns": [
-                "servers": [["type": "local", "tag": "local"]],
+                "servers": [
+                    ["type": "local", "tag": "local"],
+                    ["type": "udp", "tag": "tailscale", "server": "100.100.100.100"],
+                ],
             ],
             "inbounds": [
                 [
@@ -53,7 +57,9 @@ public enum SingBoxConfig {
             ],
             "route": [
                 "rules": [
+                    ["domain_suffix": ["ts.net"], "action": "resolve", "server": "tailscale"],
                     ["ip_is_private": true, "action": "route", "outbound": directTag],
+                    ["ip_cidr": ["100.64.0.0/10", "fd7a:115c:a1e0::/48"], "action": "route", "outbound": directTag],
                     ["domain_suffix": directDomainSuffixes, "action": "route", "outbound": directTag],
                 ],
                 "final": proxyTag,

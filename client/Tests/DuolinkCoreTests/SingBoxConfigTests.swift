@@ -53,6 +53,31 @@ import Testing
         #expect(suffixes.contains("wifi.sncf"))
         #expect(suffixes.contains("local"))
     }
+
+    @Test func keepsTailscaleDevicesDirect() throws {
+        let route = try #require(try build()["route"] as? [String: Any])
+        let rules = try #require(route["rules"] as? [[String: Any]])
+        let direct = rules.filter { $0["outbound"] as? String == "direct" }
+        let suffixes = direct.compactMap { $0["domain_suffix"] as? [String] }.flatMap { $0 }
+        let networks = direct.compactMap { $0["ip_cidr"] as? [String] }.flatMap { $0 }
+        #expect(suffixes.contains("ts.net"))
+        #expect(networks.contains("100.64.0.0/10"))
+        #expect(networks.contains("fd7a:115c:a1e0::/48"))
+    }
+
+    @Test func resolvesTailnetNamesWithMagicDNS() throws {
+        let config = try build()
+        let dns = try #require(config["dns"] as? [String: Any])
+        let servers = try #require(dns["servers"] as? [[String: Any]])
+        let tailscale = try #require(servers.first { $0["server"] as? String == "100.100.100.100" })
+        let route = try #require(config["route"] as? [String: Any])
+        let rules = try #require(route["rules"] as? [[String: Any]])
+        #expect(rules.contains {
+            ($0["domain_suffix"] as? [String])?.contains("ts.net") == true
+                && $0["action"] as? String == "resolve"
+                && $0["server"] as? String == tailscale["tag"] as? String
+        })
+    }
 }
 
 /// Validates the generated file with the real binary, when it is installed.
