@@ -44,26 +44,52 @@ Le code propre à Duolink est un petit relais en Swift et l'app de barre de menu
 - Un Mac sous macOS 14 ou plus récent, avec les outils Xcode et [Homebrew](https://brew.sh).
 - Un accès Internet en Wi-Fi.
 - Un iPhone avec un forfait de données autorisant le partage de connexion et un câble USB pour le relier au Mac.
-- Un VPS Linux avec un noyau 5.15 ou plus récent et Docker. Choisissez-le proche de chez vous : chaque requête fait l'aller-retour par lui.
+- Un VPS Linux arm64 ou x86_64 avec un noyau 5.15 ou plus récent et systemd. Docker n'est pas nécessaire. Choisissez-le proche de chez vous : chaque requête fait l'aller-retour par lui.
 
 ## Installation du serveur
 
-Sur le VPS :
+Le serveur est un service systemd utilisateur : sing-box tourne sous un compte normal, sans Docker ni root. Le réseau reste celui de la machine, donc le MPTCP passe de bout en bout, et le port 8443 ne demande aucun privilège. L'installation se fait en deux temps.
+
+### 1. Réglages système (admin, une seule fois)
+
+Un administrateur lance une fois, sur le VPS :
 
 ```sh
 git clone https://github.com/leo-mathurin/duolink.git
 cd duolink/server
-./install.sh            # PORT=8443 par défaut
+sudo ./setup-system.sh        # PORT=8443 par défaut
 ```
 
 Le script :
 
-- règle les limites MPTCP (8 sous-flux) avec un service systemd ;
-- porte le tampon d'envoi TCP à 16 Mo, pour que le serveur alimente les deux liens à la fois ;
+- règle les limites MPTCP (8 sous-flux) avec le service système `duolink-mptcp` ;
+- porte le tampon d'envoi TCP à 16 Mo dans `/etc/sysctl.d/90-duolink.conf`, pour que le serveur alimente les deux liens à la fois ;
 - active BBR, plus efficace sur les liens cellulaires qui perdent des paquets (`ENABLE_BBR=0` pour ne pas le faire) ;
-- ouvre le port dans iptables, y compris dans `/etc/iptables/rules.v4` ;
-- génère un mot de passe et lance sing-box dans Docker, en réseau `host` pour garder le MPTCP de bout en bout ;
-- affiche un lien `ss://` à coller dans l'app.
+- ouvre le port dans iptables, y compris dans `/etc/iptables/rules.v4` (`FIREWALL=0` si votre pare-feu autorise déjà le port) ;
+- active le « linger » de l'utilisateur qui a lancé `sudo` (ou `DUOLINK_USER=nom`), pour que son service démarre au boot sans session ouverte.
+
+### 2. Service sing-box (utilisateur, sans sudo)
+
+Puis, avec le compte qui fait tourner le service :
+
+```sh
+cd duolink/server
+./install.sh            # PORT=8443, LISTEN=:: par défaut
+```
+
+Le script :
+
+- télécharge sing-box depuis les [releases officielles](https://github.com/SagerNet/sing-box/releases) (version fixée, empreinte SHA-256 vérifiée, arm64 ou x86_64) dans `~/.local/bin/sing-box` ;
+- génère un mot de passe et écrit la config Shadowsocks 2022 dans `~/duolink-server/config.json` (lisible par vous seul) ;
+- écrit l'unité `~/.config/systemd/user/duolink.service`, puis l'active avec `systemctl --user enable` ;
+- vérifie que sing-box écoute sur le port ;
+- affiche un lien `ss://` à coller dans l'app. Ce lien contient le mot de passe : il n'est affiché qu'à la première installation, ou avec `SHOW_LINK=1 ./install.sh`.
+
+`LISTEN` choisit l'adresse d'écoute, par exemple l'IP privée de la machine si un autre service occupe déjà le port sur une autre interface. Une nouvelle exécution garde le mot de passe et l'adresse d'écoute, et ne redémarre le service que si le binaire, la config ou l'unité a changé.
+
+Pour mettre à jour sing-box, changez `SINGBOX_VERSION` et les deux empreintes `SINGBOX_SHA256` dans `install.sh`, puis relancez `./install.sh`. Les journaux : `journalctl --user -u duolink`.
+
+Si vous utilisiez l'ancienne version Docker, supprimez d'abord son conteneur, qui occupe le port : `docker rm -f duolink`. Lancez ensuite `./install.sh` depuis le même dossier `server/`. Le script reprend le mot de passe de `server/.password`, donc le lien `ss://` ne change pas.
 
 Ouvrez aussi le port TCP choisi (8443 par défaut) dans le pare-feu de votre hébergeur.
 
@@ -117,6 +143,7 @@ Si le Wi-Fi est connecté mais sans Internet (portail pas encore validé, accès
 - **Tailscale** : les domaines `.ts.net` et les adresses `100.64.0.0/10` et `fd7a:115c:a1e0::/48` passent en direct. Les noms `.ts.net` sont résolus par MagicDNS. Les services du tailnet voient ainsi l'identité Tailscale du Mac, par exemple pour les approbations du coffre.
 - **Les envois ne s'additionnent pas** : un upload passe par une seule connexion à la fois (voir plus haut). Il bascule sur l'autre si elle est plus rapide ou si elle tombe.
 - **Le trafic passant par l'iPhone consomme son forfait de données.** Le mode Secours peut réduire cette consommation, mais utilise aussi des données mobiles lorsqu'il passe par l'iPhone.
+- **Le serveur a besoin du MPTCP du noyau.** Si `net.mptcp.enabled` vaut 0 sur le VPS, par exemple à cause d'une mitigation de sécurité, Duolink marche quand même, mais en TCP simple : pas d'agrégation, et une connexion coupe quand son lien tombe. `install.sh` affiche alors un avertissement (`REQUIRE_MPTCP=1` pour arrêter l'installation à la place). Le mode **Combiner** redevient utile dès que le MPTCP est réactivé, sans réinstaller.
 - **Si l'app est tuée brutalement**, le proxy système peut rester actif et couper Internet. Relancez Duolink : il arrête l'ancien sing-box et restaure le réglage. Sinon, désactivez les proxys dans Réglages Système > Réseau > Wi-Fi > Proxys.
 
 ### Exemple de mesure
@@ -165,7 +192,20 @@ sudo launchctl bootout system/io.github.leo-mathurin.duolink.tethering
 sudo rm /Library/LaunchDaemons/io.github.leo-mathurin.duolink.tethering.plist
 ```
 
-Sur le serveur : `docker compose down` dans `server/`, puis `sudo systemctl disable --now duolink-mptcp`.
+Sur le serveur, avec le compte du service :
+
+```sh
+systemctl --user disable --now duolink
+rm -rf ~/duolink-server ~/.config/systemd/user/duolink.service ~/.local/bin/sing-box
+```
+
+Puis, pour un administrateur :
+
+```sh
+sudo systemctl disable --now duolink-mptcp
+sudo rm /etc/systemd/system/duolink-mptcp.service /etc/sysctl.d/90-duolink.conf
+sudo loginctl disable-linger <utilisateur>
+```
 
 ## Développement
 

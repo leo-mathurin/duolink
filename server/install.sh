@@ -1,91 +1,99 @@
 #!/usr/bin/env bash
-# Sets up the Duolink aggregation server on a Linux VPS (Ubuntu/Debian, kernel >= 5.15).
-# Idempotent: run it again after a change, the password is kept.
+# Installs or updates the Duolink server as a systemd user service. No sudo.
+# Run setup-system.sh once as root first (MPTCP limits, TCP tuning, firewall, linger).
+# Idempotent: run it again to update, the password is kept and the service
+# restarts only when the binary, the config or the unit changed.
 #
-#   PORT=8443 ./install.sh
+#   PORT=8443 LISTEN=:: ./install.sh
 set -euo pipefail
+
+# Official SagerNet release. To update, change the version and both checksums
+# (sha256 of the .tar.gz assets on the GitHub release page).
+SINGBOX_VERSION="1.14.3"
+declare -A SINGBOX_SHA256=(
+  [arm64]="29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e"
+  [amd64]="e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee"
+)
 
 PORT="${PORT:-8443}"
 METHOD="2022-blake3-aes-128-gcm"
-ENABLE_BBR="${ENABLE_BBR:-1}"
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+CONFIG_DIR="${CONFIG_DIR:-$HOME/duolink-server}"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+REQUIRE_MPTCP="${REQUIRE_MPTCP:-0}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ "$(sysctl -n net.mptcp.enabled 2>/dev/null)" == "1" ]] || {
-  echo "MPTCP is not enabled in this kernel (sysctl net.mptcp.enabled)." >&2
-  exit 1
+# Moves $1 to $2 if the content differs. Returns 0 when $2 changed.
+replace_if_changed() {
+  if cmp -s "$1" "$2"; then rm -f "$1"; return 1; fi
+  mv -f "$1" "$2"
 }
-command -v docker >/dev/null || { echo "Docker is required." >&2; exit 1; }
 
-log "MPTCP limits (persisted with a systemd unit)"
-sudo tee /etc/systemd/system/duolink-mptcp.service >/dev/null <<'EOF'
-[Unit]
-Description=Duolink MPTCP subflow limits
-After=network-online.target
+[[ $EUID -ne 0 ]] || die "run this script as the user that owns the service, not as root."
+systemctl --user show-environment >/dev/null 2>&1 \
+  || die "no systemd user manager. Log in with ssh (not su), or set XDG_RUNTIME_DIR=/run/user/$(id -u)."
 
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/ip mptcp limits set subflows 8 add_addr_accepted 8
-RemainAfterExit=yes
+case "$(uname -m)" in
+  aarch64 | arm64) ARCH=arm64 ;;
+  x86_64 | amd64) ARCH=amd64 ;;
+  *) die "unsupported architecture: $(uname -m)" ;;
+esac
 
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now duolink-mptcp.service >/dev/null
-sudo systemctl restart duolink-mptcp.service
-
-log "TCP tuning"
-{
-  # MPTCP shares one send buffer between subflows. When a 5G subflow is
-  # loaded its RTT climbs to about 200 ms, and the 4 MB default keeps the
-  # server waiting instead of feeding both links.
-  echo "net.ipv4.tcp_wmem = 4096 16384 16777216"
-  if [[ "$ENABLE_BBR" == "1" ]]; then
-    # BBR copes better with lossy cellular links.
-    echo "net.core.default_qdisc = fq"
-    echo "net.ipv4.tcp_congestion_control = bbr"
-  fi
-} | sudo tee /etc/sysctl.d/90-duolink.conf >/dev/null
-sudo sysctl -q --system
-
-log "Firewall: allow TCP $PORT"
-rule=(-p tcp -m tcp --dport "$PORT" -m comment --comment duolink -j ACCEPT)
-for family in iptables ip6tables; do
-  command -v "$family" >/dev/null || continue
-  if ! sudo "$family" -C INPUT "${rule[@]}" 2>/dev/null; then
-    # Insert before the catch-all REJECT that Oracle images ship with.
-    reject_line="$(sudo "$family" -L INPUT --line-numbers -n | awk '$2 == "REJECT" { print $1; exit }')"
-    sudo "$family" -I INPUT "${reject_line:-1}" "${rule[@]}"
-  fi
-done
-for saved in /etc/iptables/rules.v4 /etc/iptables/rules.v6; do
-  if [[ -f "$saved" ]] && ! sudo grep -q 'comment duolink' "$saved"; then
-    # Edit the saved file instead of `netfilter-persistent save`, which would
-    # also persist the chains that Docker and Tailscale create at runtime.
-    if sudo grep -q '^-A INPUT -j REJECT' "$saved"; then
-      sudo sed -i "0,/^-A INPUT -j REJECT/s//-A INPUT -p tcp -m tcp --dport $PORT -m comment --comment duolink -j ACCEPT\n&/" "$saved"
-    fi
-  fi
-done
-
-if [[ -f "$DIR/.password" ]]; then
-  PASSWORD="$(cat "$DIR/.password")"
-else
-  PASSWORD="$(openssl rand -base64 16)"
-  (umask 077 && printf '%s' "$PASSWORD" > "$DIR/.password")
+if [[ "$(sysctl -n net.mptcp.enabled 2>/dev/null)" != "1" ]]; then
+  msg="MPTCP is disabled in this kernel (net.mptcp.enabled != 1). Duolink falls back to plain TCP: no aggregation, and a connection drops when its link goes down."
+  [[ "$REQUIRE_MPTCP" == "1" ]] && die "$msg"
+  warn "$msg Set REQUIRE_MPTCP=1 to stop here instead."
+elif ! systemctl is-enabled --quiet duolink-mptcp.service 2>/dev/null; then
+  warn "duolink-mptcp.service is not enabled. Ask an admin to run: sudo ./setup-system.sh"
 fi
+[[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null)" == "yes" ]] \
+  || warn "linger is off for $USER: the service stops at logout and does not start at boot. Ask an admin to run: sudo loginctl enable-linger $USER"
 
-log "sing-box config"
-(umask 077 && cat > "$DIR/config.json" <<EOF
+mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$UNIT_DIR"
+changed=0
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+log "sing-box $SINGBOX_VERSION ($ARCH)"
+asset="sing-box-$SINGBOX_VERSION-linux-$ARCH"
+curl -fsSL -o "$tmp/$asset.tar.gz" \
+  "https://github.com/SagerNet/sing-box/releases/download/v$SINGBOX_VERSION/$asset.tar.gz"
+echo "${SINGBOX_SHA256[$ARCH]}  $tmp/$asset.tar.gz" | sha256sum -c --quiet - \
+  || die "checksum mismatch for $asset.tar.gz"
+tar -xzf "$tmp/$asset.tar.gz" -C "$tmp" "$asset/sing-box"
+# Rename instead of overwriting: the running binary cannot be written to.
+install -m 0755 "$tmp/$asset/sing-box" "$BIN_DIR/.sing-box.new"
+replace_if_changed "$BIN_DIR/.sing-box.new" "$BIN_DIR/sing-box" && changed=1
+SINGBOX="$BIN_DIR/sing-box"
+
+# Earlier versions kept the password next to this script.
+[[ -f "$CONFIG_DIR/.password" || ! -f "$DIR/.password" ]] || cp -p "$DIR/.password" "$CONFIG_DIR/.password"
+new_password=0
+if [[ ! -s "$CONFIG_DIR/.password" ]]; then
+  (umask 077 && "$SINGBOX" generate rand --base64 16 | tr -d '\n' > "$CONFIG_DIR/.password")
+  new_password=1
+fi
+PASSWORD="$(cat "$CONFIG_DIR/.password")"
+
+# Keep the listen address of the current config unless LISTEN is set.
+if [[ -z "${LISTEN:-}" && -f "$CONFIG_DIR/config.json" ]]; then
+  LISTEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["inbounds"][0]["listen"])' "$CONFIG_DIR/config.json" 2>/dev/null || true)"
+fi
+LISTEN="${LISTEN:-::}"
+
+log "Config: $CONFIG_DIR/config.json (listen $LISTEN, port $PORT)"
+(umask 077 && cat > "$tmp/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
   "inbounds": [
     {
       "type": "shadowsocks",
       "tag": "ss-in",
-      "listen": "::",
+      "listen": "$LISTEN",
       "listen_port": $PORT,
       "tcp_multi_path": true,
       "method": "$METHOD",
@@ -96,14 +104,61 @@ log "sing-box config"
 }
 EOF
 )
+"$SINGBOX" check -c "$tmp/config.json"
+replace_if_changed "$tmp/config.json" "$CONFIG_DIR/config.json" && changed=1
+chmod 600 "$CONFIG_DIR/config.json" "$CONFIG_DIR/.password"
 
-log "Starting the container"
-(cd "$DIR" && docker compose up -d --force-recreate)
+log "Unit: $UNIT_DIR/duolink.service"
+cat > "$tmp/duolink.service" <<EOF
+[Unit]
+Description=Duolink aggregation server (sing-box, MPTCP)
+After=network-online.target
 
-PUBLIC_IP="${PUBLIC_IP:-$(curl -fsS -m 5 https://ifconfig.me || hostname -I | awk '{print $1}')}"
-USERINFO="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$METHOD:$PASSWORD")"
+[Service]
+# Runs on the host network as $USER: MPTCP subflows stay end to end, and port $PORT needs no privilege.
+ExecStart=${SINGBOX/#"$HOME"/%h} run -c ${CONFIG_DIR/#"$HOME"/%h}/config.json
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
 
-cat <<EOF
+[Install]
+WantedBy=default.target
+EOF
+replace_if_changed "$tmp/duolink.service" "$UNIT_DIR/duolink.service" && changed=1
+
+systemctl --user daemon-reload
+systemctl --user enable --quiet duolink.service
+if [[ "$changed" == "1" ]]; then
+  log "Restarting duolink.service"
+  systemctl --user restart duolink.service
+else
+  log "Nothing changed, duolink.service keeps running"
+  systemctl --user start duolink.service
+fi
+
+log "Checking that sing-box listens on $LISTEN:$PORT"
+case "$LISTEN" in
+  :: | 0.0.0.0) want=":$PORT" ;;
+  *:*) want="[$LISTEN]:$PORT" ;;
+  *) want="$LISTEN:$PORT" ;;
+esac
+for _ in $(seq 20); do
+  if systemctl --user is-active --quiet duolink.service \
+    && ss -Hltn "sport = :$PORT" | awk -v want="$want" 'index($4, want) { found = 1 } END { exit !found }'; then
+    listening=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ -z "${listening:-}" ]]; then
+  journalctl --user -u duolink.service -n 20 --no-pager >&2 || true
+  die "duolink.service does not listen on $LISTEN:$PORT"
+fi
+
+if [[ "$new_password" == "1" || "${SHOW_LINK:-0}" == "1" ]]; then
+  PUBLIC_IP="${PUBLIC_IP:-$(curl -fsS -m 5 https://ifconfig.me || hostname -I | awk '{print $1}')}"
+  USERINFO="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$METHOD:$PASSWORD")"
+  cat <<EOF
 
 Done. Remember to also open TCP $PORT in your cloud firewall
 (Oracle: VCN security list or network security group).
@@ -113,3 +168,7 @@ Copy this link, then in the Duolink menu click "Coller le lien ss://":
   ss://$USERINFO@$PUBLIC_IP:$PORT#duolink
 
 EOF
+else
+  echo
+  echo "Done. The password did not change. Run SHOW_LINK=1 ./install.sh to print the ss:// link again."
+fi
